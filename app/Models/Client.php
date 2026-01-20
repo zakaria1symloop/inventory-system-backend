@@ -20,6 +20,11 @@ class Client extends Model
         'credit_limit',
         'balance',
         'is_active',
+        'rc',
+        'nif',
+        'ai',
+        'nis',
+        'rib',
     ];
 
     protected $casts = [

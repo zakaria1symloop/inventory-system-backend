@@ -19,6 +19,12 @@ return new class extends Migration
             $table->decimal('credit_limit', 12, 2)->default(0);
             $table->decimal('balance', 12, 2)->default(0);
             $table->boolean('is_active')->default(true);
+            // Legal information
+            $table->string('rc')->nullable(); // Commercial Register
+            $table->string('nif')->nullable(); // Tax Identification Number
+            $table->string('ai')->nullable(); // Article Number
+            $table->string('nis')->nullable(); // Statistical Number
+            $table->string('rib')->nullable(); // Bank Account Number
             $table->timestamps();
             $table->softDeletes();
         });
