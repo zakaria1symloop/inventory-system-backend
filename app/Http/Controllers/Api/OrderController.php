@@ -114,14 +114,11 @@ class OrderController extends Controller
                     'discount' => $item['discount'] ?? 0,
                 ]);
 
-                // Reduce stock immediately when order is created
-                Stock::updateStock($item['product_id'], $request->warehouse_id, $item['quantity'], 'subtract');
-
-                // Record stock movement
+                // Record stock movement (this also updates stock automatically)
                 StockMovement::record(
                     $item['product_id'],
                     $request->warehouse_id,
-                    -$item['quantity'], // negative for reduction
+                    $item['quantity'], // StockMovement::record handles the sign based on type
                     StockMovement::TYPE_ORDER,
                     $order->reference,
                     $order,
@@ -186,9 +183,7 @@ class OrderController extends Controller
         try {
             // Return stock when deleting order
             foreach ($order->items as $item) {
-                Stock::updateStock($item->product_id, $order->warehouse_id, $item->quantity_ordered, 'add');
-
-                // Record stock movement
+                // Record stock movement (this also updates stock automatically)
                 StockMovement::record(
                     $item->product_id,
                     $order->warehouse_id,
