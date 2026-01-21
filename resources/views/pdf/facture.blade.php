@@ -192,6 +192,15 @@ use App\Helpers\ArabicHelper;
                         <strong>{{ ArabicHelper::safe($sale->client->name ?? null, 'Client') }}</strong><br>
                         Tel: {{ $sale->client->phone ?? '-' }}<br>
                         Adresse: {{ ArabicHelper::safe($sale->client->address ?? null, '-') }}
+                        @if(!empty($sale->client->rc) || !empty($sale->client->nif) || !empty($sale->client->ai) || !empty($sale->client->nis) || !empty($sale->client->rib))
+                        <div class="legal-info" style="margin-top: 4px; border-top: 1px dashed #ccc; padding-top: 4px;">
+                            @if(!empty($sale->client->rc))<strong>RC:</strong> {{ $sale->client->rc }} @endif
+                            @if(!empty($sale->client->nif))<strong>NIF:</strong> {{ $sale->client->nif }} @endif
+                            @if(!empty($sale->client->ai))<br><strong>AI:</strong> {{ $sale->client->ai }} @endif
+                            @if(!empty($sale->client->nis))<strong>NIS:</strong> {{ $sale->client->nis }} @endif
+                            @if(!empty($sale->client->rib))<br><strong>RIB:</strong> {{ $sale->client->rib }} @endif
+                        </div>
+                        @endif
                     @else
                         <strong>Client Comptoir</strong>
                     @endif
@@ -222,15 +231,19 @@ use App\Helpers\ArabicHelper;
         <thead>
             <tr>
                 <th style="width: 4%;">N°</th>
-                <th style="width: 36%;">Designation</th>
-                <th style="width: 14%;">Unite (Pcs)</th>
+                <th style="width: 30%;">Designation</th>
+                <th style="width: 10%;">Unite (Pcs)</th>
                 <th style="width: 8%;">Qte</th>
+                <th style="width: 10%;">Nb Pieces</th>
                 <th style="width: 12%;">P.U</th>
                 <th style="width: 10%;">Remise</th>
                 <th style="width: 16%;">Montant</th>
             </tr>
         </thead>
         <tbody>
+            @php
+                $totalPieces = 0;
+            @endphp
             @foreach($sale->items ?? [] as $index => $item)
             @php
                 $product = $item->product ?? null;
@@ -238,6 +251,8 @@ use App\Helpers\ArabicHelper;
                 $piecesPerPkg = $product->pieces_per_package ?? 1;
                 $unitShortName = $product->unitSale->short_name ?? 'U';
                 $qty = $item->quantity ?? 0;
+                $nbPieces = $qty * $piecesPerPkg;
+                $totalPieces += $nbPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
                 // Use the stored subtotal which includes pieces_per_package calculation
@@ -253,6 +268,7 @@ use App\Helpers\ArabicHelper;
                     @endif
                 </td>
                 <td class="text-center">{{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}</td>
+                <td class="text-center" style="font-weight: bold;">{{ number_format($nbPieces, $nbPieces == floor($nbPieces) ? 0 : 2) }}</td>
                 <td class="text-right">{{ number_format($unitPrice, 2) }}</td>
                 <td class="text-right">{{ number_format($itemDiscount, 2) }}</td>
                 <td class="text-right">{{ number_format($lineTotal, 2) }}</td>
@@ -303,48 +319,6 @@ use App\Helpers\ArabicHelper;
     @if(!empty($sale->note))
     <div class="payment-box">
         <strong>Observations:</strong> {{ ArabicHelper::safe($sale->note, '') }}
-    </div>
-    @endif
-
-    <!-- Payment History -->
-    @if($sale->payments && count($sale->payments) > 0)
-    <div style="margin-top: 10px;">
-        <table class="products">
-            <thead>
-                <tr>
-                    <th colspan="4" style="background: #555; text-align: left; padding-left: 8px;">HISTORIQUE DES PAIEMENTS</th>
-                </tr>
-                <tr>
-                    <th style="width: 25%;">Date</th>
-                    <th style="width: 25%;">Mode</th>
-                    <th style="width: 25%;">Montant</th>
-                    <th style="width: 25%;">Reference</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach($sale->payments as $payment)
-                @php
-                    $paymentMethod = $payment->payment_method ?? 'other';
-                    $paymentAmount = $payment->amount ?? 0;
-                    $paymentDate = $payment->date ?? now();
-                    $paymentRef = $payment->reference ?? '-';
-                @endphp
-                <tr>
-                    <td class="text-center">{{ \Carbon\Carbon::parse($paymentDate)->format('d/m/Y') }}</td>
-                    <td class="text-center">
-                        @switch($paymentMethod)
-                            @case('cash') <strong style="color: green;">Especes</strong> @break
-                            @case('bank') <strong style="color: blue;">Virement</strong> @break
-                            @case('check') <strong style="color: orange;">Cheque</strong> @break
-                            @default {{ $paymentMethod }}
-                        @endswitch
-                    </td>
-                    <td class="text-right" style="color: green; font-weight: bold;">{{ number_format($paymentAmount, 2) }} DA</td>
-                    <td class="text-center" style="font-size: 7px;">{{ $paymentRef }}</td>
-                </tr>
-                @endforeach
-            </tbody>
-        </table>
     </div>
     @endif
 

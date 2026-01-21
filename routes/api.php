@@ -133,6 +133,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/payments/{payment}', [PaymentController::class, 'destroy']);
     Route::post('/purchases/{purchase}/payments', [PaymentController::class, 'storePurchasePayment']);
     Route::post('/sales/{sale}/payments', [PaymentController::class, 'storeSalePayment']);
+    Route::post('/clients/{client}/payments', [PaymentController::class, 'storeClientPayment']);
 
     // Adjustments
     Route::apiResource('adjustments', AdjustmentController::class)->except(['update']);

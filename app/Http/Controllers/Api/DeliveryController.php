@@ -232,12 +232,21 @@ class DeliveryController extends Controller
                 }
             }
 
-            // Update client balance - add debt if not fully paid
-            $debtAmount = $deliveryOrder->amount_due - $amountCollected;
-            if ($debtAmount > 0 && $deliveryOrder->client_id) {
+            // Update client balance based on payment
+            if ($deliveryOrder->client_id) {
                 $client = $deliveryOrder->client;
                 if ($client) {
-                    $client->updateBalance($debtAmount, 'add');
+                    $difference = $deliveryOrder->amount_due - $amountCollected;
+
+                    if ($difference > 0) {
+                        // Underpayment - add to client's debt
+                        $client->updateBalance($difference, 'add');
+                    } elseif ($difference < 0) {
+                        // Overpayment - subtract from client's old debt
+                        $overpayment = abs($difference);
+                        $client->updateBalance($overpayment, 'subtract');
+                    }
+                    // If difference == 0, no balance update needed (exact payment)
                 }
             }
 
@@ -338,12 +347,21 @@ class DeliveryController extends Controller
 
             $deliveryOrder->save();
 
-            // Update client balance - add debt if not fully paid
-            $debtAmount = $newAmountDue - $amountCollected;
-            if ($debtAmount > 0 && $deliveryOrder->client_id) {
+            // Update client balance based on payment
+            if ($deliveryOrder->client_id) {
                 $client = $deliveryOrder->client;
                 if ($client) {
-                    $client->updateBalance($debtAmount, 'add');
+                    $difference = $newAmountDue - $amountCollected;
+
+                    if ($difference > 0) {
+                        // Underpayment - add to client's debt
+                        $client->updateBalance($difference, 'add');
+                    } elseif ($difference < 0) {
+                        // Overpayment - subtract from client's old debt
+                        $overpayment = abs($difference);
+                        $client->updateBalance($overpayment, 'subtract');
+                    }
+                    // If difference == 0, no balance update needed (exact payment)
                 }
             }
 

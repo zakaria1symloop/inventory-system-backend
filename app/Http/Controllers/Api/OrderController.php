@@ -112,6 +112,20 @@ class OrderController extends Controller
                     'unit_price' => $item['unit_price'],
                     'discount' => $item['discount'] ?? 0,
                 ]);
+
+                // Reduce stock immediately when order is created
+                Stock::updateStock($item['product_id'], $request->warehouse_id, $item['quantity'], 'subtract');
+
+                // Record stock movement
+                StockMovement::record(
+                    $item['product_id'],
+                    $request->warehouse_id,
+                    -$item['quantity'], // negative for reduction
+                    StockMovement::TYPE_ORDER,
+                    $order->reference,
+                    $order,
+                    $item['unit_price']
+                );
             }
 
             $order->calculateTotals();
@@ -167,9 +181,32 @@ class OrderController extends Controller
             ], 400);
         }
 
-        $order->delete();
+        DB::beginTransaction();
+        try {
+            // Return stock when deleting order
+            foreach ($order->items as $item) {
+                Stock::updateStock($item->product_id, $order->warehouse_id, $item->quantity_ordered, 'add');
 
-        return response()->json(['message' => 'تم حذف الطلب بنجاح']);
+                // Record stock movement
+                StockMovement::record(
+                    $item->product_id,
+                    $order->warehouse_id,
+                    $item->quantity_ordered, // positive for addition
+                    'adjustment',
+                    'حذف طلب ' . $order->reference,
+                    null,
+                    0
+                );
+            }
+
+            $order->delete();
+
+            DB::commit();
+            return response()->json(['message' => 'تم حذف الطلب بنجاح']);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
     }
 
     public function confirm(Order $order)

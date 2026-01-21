@@ -42,6 +42,7 @@ class StockMovement extends Model
     const TYPE_DELIVERY_OUT = 'delivery_out';
     const TYPE_DELIVERY_RETURN = 'delivery_return';
     const TYPE_OPENING = 'opening';
+    const TYPE_ORDER = 'order';
 
     public function product()
     {
@@ -153,6 +154,7 @@ class StockMovement extends Model
             self::TYPE_DELIVERY_OUT => 'خروج للتوصيل',
             self::TYPE_DELIVERY_RETURN => 'مرتجع توصيل',
             self::TYPE_OPENING => 'رصيد افتتاحي',
+            self::TYPE_ORDER => 'طلب',
         ];
 
         return $labels[$this->type] ?? $this->type;

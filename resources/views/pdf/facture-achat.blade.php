@@ -327,6 +327,36 @@ use App\Helpers\ArabicHelper;
         </tr>
     </table>
 
+    <!-- Debt Information -->
+    @if($purchase->supplier)
+    @php
+        // Calculate debt information
+        $oldDebt = $purchase->supplier->balance - $purchase->grand_total + ($purchase->paid_amount ?? 0);
+        $paidForThisPurchase = $purchase->paid_amount ?? 0;
+        $newTotalDebt = $purchase->supplier->balance;
+    @endphp
+    <table style="width: 250px; margin-left: auto; border: 1px solid #000; margin-top: 10px; margin-bottom: 10px;">
+        <tr style="background: #f5f5f5;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd; font-size: 8px;"><strong>Dette Ancienne:</strong></td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; font-size: 8px; color: {{ $oldDebt > 0 ? 'red' : 'green' }};"><strong>{{ number_format($oldDebt, 2) }} DA</strong></td>
+        </tr>
+        <tr style="background: #f5f5f5;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd; font-size: 8px;"><strong>Cet Achat:</strong></td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; font-size: 8px; color: red;"><strong>{{ number_format($purchase->grand_total, 2) }} DA</strong></td>
+        </tr>
+        @if($paidForThisPurchase > 0)
+        <tr style="background: #e8f5e9;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd; font-size: 8px;">Paiement:</td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; font-size: 8px; color: green;"><strong>- {{ number_format($paidForThisPurchase, 2) }} DA</strong></td>
+        </tr>
+        @endif
+        <tr style="background: #1a365d; color: #fff; font-weight: bold;">
+            <td style="padding: 6px; text-align: left; font-size: 9px;">DETTE TOTALE:</td>
+            <td style="padding: 6px; text-align: right; font-size: 9px;">{{ number_format($newTotalDebt, 2) }} DA</td>
+        </tr>
+    </table>
+    @endif
+
     @if(!empty($purchase->note))
     <div class="payment-box">
         <strong>Observations:</strong> {{ ArabicHelper::safe($purchase->note, '') }}

@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Client;
 use App\Models\Payment;
 use App\Models\Purchase;
 use App\Models\Sale;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class PaymentController extends Controller
 {
@@ -103,6 +105,48 @@ class PaymentController extends Controller
         }
 
         return response()->json($payment->load(['user', 'payable']), 201);
+    }
+
+    public function storeClientPayment(Request $request, Client $client)
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:0.01',
+            'payment_method' => 'nullable|string',
+            'notes' => 'nullable|string',
+        ]);
+
+        if ($request->amount > $client->balance) {
+            return response()->json(['message' => 'المبلغ أكبر من الدين الحالي'], 400);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            // Create payment record (without payable since it's a general client payment)
+            $payment = Payment::create([
+                'payable_type' => null,
+                'payable_id' => null,
+                'amount' => $request->amount,
+                'payment_method' => $request->payment_method ?? 'cash',
+                'date' => now(),
+                'notes' => $request->notes ? "دفع دين للعميل: {$client->name} - {$request->notes}" : "دفع دين للعميل: {$client->name}",
+                'user_id' => auth()->id(),
+            ]);
+
+            // Update client balance
+            $client->updateBalance($request->amount, 'subtract');
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'تم تسجيل الدفعة بنجاح',
+                'payment' => $payment,
+                'new_balance' => $client->fresh()->balance
+            ], 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
     }
 
     public function show(Payment $payment)

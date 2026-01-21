@@ -67,6 +67,7 @@ class PurchaseController extends Controller
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity' => 'required|numeric|min:0.01',
             'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.selling_price' => 'nullable|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0',
             'items.*.tax' => 'nullable|numeric|min:0',
         ]);
@@ -95,6 +96,15 @@ class PurchaseController extends Controller
                     'discount' => $item['discount'] ?? 0,
                     'tax' => $item['tax'] ?? 0,
                 ]);
+
+                // Update product selling price if provided
+                if (isset($item['selling_price']) && $item['selling_price'] > 0) {
+                    $product = \App\Models\Product::find($item['product_id']);
+                    if ($product) {
+                        $product->unit_price = $item['selling_price'];
+                        $product->save();
+                    }
+                }
 
                 // Record stock movement
                 StockMovement::record(

@@ -219,6 +219,15 @@ use App\Helpers\ArabicHelper;
                         <div class="info-row"><span class="info-label">Nom:</span> {{ ArabicHelper::safe($sale->client->name ?? null, '-') }}</div>
                         <div class="info-row"><span class="info-label">Tel:</span> {{ $sale->client->phone ?? '-' }}</div>
                         <div class="info-row"><span class="info-label">Adresse:</span> {{ ArabicHelper::safe($sale->client->address ?? null, '-') }}</div>
+                        @if(!empty($sale->client->rc) || !empty($sale->client->nif) || !empty($sale->client->ai) || !empty($sale->client->nis) || !empty($sale->client->rib))
+                        <div style="font-size: 9px; margin-top: 5px; color: #333; border-top: 1px solid #ddd; padding-top: 5px;">
+                            @if(!empty($sale->client->rc))<div><strong>RC:</strong> {{ $sale->client->rc }}</div>@endif
+                            @if(!empty($sale->client->nif))<div><strong>NIF:</strong> {{ $sale->client->nif }}</div>@endif
+                            @if(!empty($sale->client->ai))<div><strong>AI:</strong> {{ $sale->client->ai }}</div>@endif
+                            @if(!empty($sale->client->nis))<div><strong>NIS:</strong> {{ $sale->client->nis }}</div>@endif
+                            @if(!empty($sale->client->rib))<div><strong>RIB:</strong> {{ $sale->client->rib }}</div>@endif
+                        </div>
+                        @endif
                     @else
                         <div class="info-row"><span class="info-label">Client:</span> Comptoir</div>
                     @endif
@@ -244,14 +253,15 @@ use App\Helpers\ArabicHelper;
                 <th style="width: 29%;">Designation</th>
                 <th style="width: 8%;">Qte</th>
                 <th style="width: 10%;">Unite (Pcs)</th>
+                <th style="width: 10%;">Nb Pieces</th>
                 <th style="width: 12%;">P.U</th>
                 <th style="width: 16%;">Montant</th>
-                <th style="width: 6%;">Ctrl</th>
             </tr>
         </thead>
         <tbody>
             @php
                 $totalQty = 0;
+                $totalPieces = 0;
                 $calculatedTotal = 0;
             @endphp
             @foreach($sale->items ?? [] as $index => $item)
@@ -263,6 +273,8 @@ use App\Helpers\ArabicHelper;
                 $piecesPerPkg = $product->pieces_per_package ?? 1;
                 $qty = $item->quantity ?? 0;
                 $totalQty += $qty;
+                $nbPieces = $qty * $piecesPerPkg;
+                $totalPieces += $nbPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
                 // Use stored subtotal (includes pieces_per_package)
@@ -281,9 +293,9 @@ use App\Helpers\ArabicHelper;
                     <br><span class="unit-info">({{ $piecesPerPkg }} pcs)</span>
                     @endif
                 </td>
+                <td class="text-center"><strong>{{ number_format($nbPieces, $nbPieces == floor($nbPieces) ? 0 : 2) }}</strong></td>
                 <td class="text-right">{{ number_format($unitPrice, 2) }}</td>
                 <td class="text-right"><strong>{{ number_format($lineTotal, 2) }}</strong></td>
-                <td class="text-center"><div class="checkbox"></div></td>
             </tr>
             @endforeach
             <!-- Totals Row -->
@@ -291,9 +303,9 @@ use App\Helpers\ArabicHelper;
                 <td colspan="2" class="text-right"><strong>TOTAL</strong></td>
                 <td class="text-center"><strong>{{ number_format($totalQty, $totalQty == floor($totalQty) ? 0 : 2) }}</strong></td>
                 <td class="text-center">-</td>
+                <td class="text-center"><strong>{{ number_format($totalPieces, $totalPieces == floor($totalPieces) ? 0 : 2) }}</strong></td>
                 <td class="text-center">-</td>
                 <td class="text-right"><strong>{{ number_format($calculatedTotal, 2) }}</strong></td>
-                <td></td>
             </tr>
         </tbody>
     </table>
@@ -328,24 +340,51 @@ use App\Helpers\ArabicHelper;
         </tr>
     </table>
 
-    <!-- Check Section -->
-    <div class="check-section">
-        <h4>Verification a la Livraison:</h4>
-        <div class="check-row"><span class="checkbox"></span> Marchandise conforme a la commande</div>
-        <div class="check-row"><span class="checkbox"></span> Quantites verifiees et correctes</div>
-        <div class="check-row"><span class="checkbox"></span> Etat de la marchandise: Bon / Endommage</div>
-        <div class="check-row"><span class="checkbox"></span> Aucune reserve</div>
-    </div>
+    <!-- Debt Information -->
+    @if($sale->client)
+    @php
+        // Calculate debt matching debtors page (Sales + Delivery Orders)
+        $clientId = $sale->client_id;
 
-    <!-- Observations -->
-    <div class="info-box">
-        <h3>OBSERVATIONS / RESERVES</h3>
-        <div style="height: 50px;">
-            @if(!empty($sale->note))
-                {{ ArabicHelper::safe($sale->note, '') }}
-            @endif
-        </div>
-    </div>
+        // Sales debt (excluding current sale)
+        $allSalesDebt = \App\Models\Sale::where('client_id', $clientId)
+            ->where('status', 'completed')
+            ->where('id', '!=', $sale->id)
+            ->sum('due_amount');
+
+        // Delivery orders debt
+        $deliveryDebt = \App\Models\DeliveryOrder::where('client_id', $clientId)
+            ->whereIn('status', ['delivered', 'partial'])
+            ->whereRaw('amount_due > amount_collected')
+            ->selectRaw('SUM(amount_due - amount_collected) as total')
+            ->value('total') ?? 0;
+
+        $oldDebt = $allSalesDebt + $deliveryDebt;
+        $paidForThisDelivery = $sale->paid_amount ?? 0;
+        $thisDeliveryDebt = $sale->due_amount ?? 0;
+        $newTotalDebt = $oldDebt + $thisDeliveryDebt;
+    @endphp
+    <table style="width: 250px; margin-left: auto; border: 1px solid #000; margin-top: 15px; margin-bottom: 15px;">
+        <tr style="background: #f5f5f5;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd;"><strong>Dette Ancienne:</strong></td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; color: {{ $oldDebt > 0 ? 'red' : 'green' }};"><strong>{{ number_format($oldDebt, 2) }} DA</strong></td>
+        </tr>
+        <tr style="background: #f5f5f5;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd;"><strong>Dette de Cette Livraison:</strong></td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; color: red;"><strong>{{ number_format($thisDeliveryDebt, 2) }} DA</strong></td>
+        </tr>
+        @if($paidForThisDelivery > 0)
+        <tr style="background: #e8f5e9;">
+            <td style="padding: 5px; text-align: left; border-bottom: 1px solid #ddd;">Paiement:</td>
+            <td style="padding: 5px; text-align: right; border-bottom: 1px solid #ddd; color: green;"><strong>- {{ number_format($paidForThisDelivery, 2) }} DA</strong></td>
+        </tr>
+        @endif
+        <tr style="background: #333; color: #fff; font-weight: bold;">
+            <td style="padding: 8px; text-align: left;">DETTE TOTALE:</td>
+            <td style="padding: 8px; text-align: right;">{{ number_format($newTotalDebt, 2) }} DA</td>
+        </tr>
+    </table>
+    @endif
 
     <!-- Signatures -->
     <table style="width: 100%; margin-top: 20px;">
