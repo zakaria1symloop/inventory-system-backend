@@ -41,7 +41,14 @@ class Payment extends Model
     {
         $prefix = 'PAY';
         $date = now()->format('Ymd');
-        $last = self::whereDate('created_at', today())->latest()->first();
+
+        // Use database locking to prevent race conditions
+        // Find the last payment with today's date pattern in reference
+        $last = self::where('reference', 'LIKE', $prefix . $date . '%')
+            ->lockForUpdate()
+            ->latest('id')
+            ->first();
+
         $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
 
         return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
