@@ -114,16 +114,8 @@ class OrderController extends Controller
                     'discount' => $item['discount'] ?? 0,
                 ]);
 
-                // Record stock movement (this also updates stock automatically)
-                StockMovement::record(
-                    $item['product_id'],
-                    $request->warehouse_id,
-                    $item['quantity'], // StockMovement::record handles the sign based on type
-                    StockMovement::TYPE_ORDER,
-                    $order->reference,
-                    $order,
-                    $item['unit_price']
-                );
+                // Note: Orders do NOT reduce physical stock, they only reserve it
+                // Stock is reduced when delivery starts (TYPE_DELIVERY_OUT)
             }
 
             $order->calculateTotals();
@@ -181,20 +173,8 @@ class OrderController extends Controller
 
         DB::beginTransaction();
         try {
-            // Return stock when deleting order
-            foreach ($order->items as $item) {
-                // Record stock movement (this also updates stock automatically)
-                StockMovement::record(
-                    $item->product_id,
-                    $order->warehouse_id,
-                    $item->quantity_ordered, // positive for addition
-                    'adjustment',
-                    'حذف طلب ' . $order->reference,
-                    null,
-                    0
-                );
-            }
-
+            // Note: No need to return stock since orders don't reduce physical stock
+            // They only reserve stock, which is automatically unreserved when order is deleted
             $order->delete();
 
             DB::commit();
