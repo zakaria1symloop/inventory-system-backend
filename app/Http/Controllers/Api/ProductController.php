@@ -62,6 +62,13 @@ class ProductController extends Controller
 
     public function store(Request $request)
     {
+        // Check demo mode limit (10 products max)
+        if (config('app.demo_mode') && Product::count() >= 10) {
+            return response()->json([
+                'message' => 'النسخة التجريبية تسمح بإضافة 10 منتجات فقط. للحصول على النسخة الكاملة تواصل معنا.'
+            ], 403);
+        }
+
         $request->validate([
             'name' => 'required|string|max:255',
             'category_id' => 'nullable|exists:categories,id',
