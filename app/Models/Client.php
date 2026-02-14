@@ -25,6 +25,9 @@ class Client extends Model
         'ai',
         'nis',
         'rib',
+        'client_category_id',
+        'created_by',
+        'source',
     ];
 
     protected $casts = [
@@ -34,6 +37,16 @@ class Client extends Model
         'balance' => 'decimal:2',
         'is_active' => 'boolean',
     ];
+
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function clientCategory()
+    {
+        return $this->belongsTo(ClientCategory::class);
+    }
 
     public function sales()
     {

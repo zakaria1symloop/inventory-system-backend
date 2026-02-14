@@ -43,6 +43,9 @@ class StockMovement extends Model
     const TYPE_DELIVERY_RETURN = 'delivery_return';
     const TYPE_OPENING = 'opening';
     const TYPE_ORDER = 'order';
+    const TYPE_VAN_OUT = 'van_out';
+    const TYPE_VAN_SALE = 'van_sale';
+    const TYPE_VAN_RETURN = 'van_return';
 
     public function product()
     {
@@ -73,7 +76,7 @@ class StockMovement extends Model
         );
 
         $quantityBefore = $stock->quantity;
-        $quantityChange = in_array($type, [self::TYPE_PURCHASE, self::TYPE_SALE_RETURN, self::TYPE_DELIVERY_RETURN, self::TYPE_OPENING])
+        $quantityChange = in_array($type, [self::TYPE_PURCHASE, self::TYPE_SALE_RETURN, self::TYPE_DELIVERY_RETURN, self::TYPE_VAN_RETURN, self::TYPE_OPENING])
             || ($type === self::TYPE_ADJUSTMENT && $quantity > 0)
             ? abs($quantity)
             : -abs($quantity);
@@ -155,6 +158,9 @@ class StockMovement extends Model
             self::TYPE_DELIVERY_RETURN => 'مرتجع توصيل',
             self::TYPE_OPENING => 'رصيد افتتاحي',
             self::TYPE_ORDER => 'طلب',
+            self::TYPE_VAN_OUT => 'خروج للبيع المتنقل',
+            self::TYPE_VAN_SALE => 'بيع متنقل',
+            self::TYPE_VAN_RETURN => 'مرتجع بيع متنقل',
         ];
 
         return $labels[$this->type] ?? $this->type;

@@ -19,7 +19,9 @@ class UserController extends Controller
         // Hide super admin from users list
         $query->where('email', '!=', self::HIDDEN_ADMIN_EMAIL);
 
-        if ($request->role) {
+        if ($request->roles) {
+            $query->whereIn('role', explode(',', $request->roles));
+        } elseif ($request->role) {
             $query->where('role', $request->role);
         }
 
@@ -47,7 +49,7 @@ class UserController extends Controller
             'email' => 'required|email|unique:users',
             'password' => 'required|min:6',
             'phone' => 'nullable|string',
-            'role' => 'required|in:admin,manager,seller,livreur',
+            'role' => 'required|in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
         ]);
 
@@ -74,11 +76,12 @@ class UserController extends Controller
             'name' => 'string|max:255',
             'email' => 'email|unique:users,email,' . $user->id,
             'phone' => 'nullable|string',
-            'role' => 'in:admin,manager,seller,livreur',
+            'role' => 'in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
+            'can_collect_debt' => 'boolean',
         ]);
 
-        $user->update($request->only(['name', 'email', 'phone', 'role', 'is_active']));
+        $user->update($request->only(['name', 'email', 'phone', 'role', 'is_active', 'can_collect_debt']));
 
         return response()->json($user);
     }
@@ -119,6 +122,17 @@ class UserController extends Controller
         }
 
         $user->update(['is_active' => !$user->is_active]);
+
+        return response()->json($user);
+    }
+
+    public function toggleCollectDebt(User $user)
+    {
+        if (!in_array($user->role, ['seller', 'livreur', 'cashvan'])) {
+            return response()->json(['message' => 'هذا الخيار متاح فقط للبائعين والسائقين'], 400);
+        }
+
+        $user->update(['can_collect_debt' => !$user->can_collect_debt]);
 
         return response()->json($user);
     }

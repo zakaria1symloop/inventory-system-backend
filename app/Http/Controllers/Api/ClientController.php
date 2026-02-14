@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\DeliveryOrder;
+use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -12,7 +13,16 @@ class ClientController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Client::query();
+        $query = Client::with(['clientCategory', 'creator:id,name']);
+
+        // Seller visibility: sellers only see their own clients unless setting allows
+        $user = auth()->user();
+        if (in_array($user->role, ['seller', 'livreur'])) {
+            $canSeeAll = Setting::get('seller_see_all_clients', 'false') === 'true';
+            if (!$canSeeAll) {
+                $query->where('created_by', $user->id);
+            }
+        }
 
         if ($request->active_only) {
             $query->active();
@@ -28,6 +38,14 @@ class ClientController extends Controller
 
         if ($request->has_balance) {
             $query->where('balance', '>', 0);
+        }
+
+        if ($request->source) {
+            $query->where('source', $request->source);
+        }
+
+        if ($request->created_by) {
+            $query->where('created_by', $request->created_by);
         }
 
         $clients = $query->latest()->paginate($request->per_page ?? 15);
@@ -81,16 +99,24 @@ class ClientController extends Controller
             'gps_lng' => 'nullable|numeric',
             'credit_limit' => 'nullable|numeric|min:0',
             'is_active' => 'boolean',
+            'client_category_id' => 'nullable|exists:client_categories,id',
         ]);
 
-        $client = Client::create($request->all());
+        $data = $request->all();
+        $data['created_by'] = auth()->id();
 
-        return response()->json($client, 201);
+        // Auto-detect source based on user role
+        $role = auth()->user()->role;
+        $data['source'] = in_array($role, ['seller', 'livreur']) ? 'app' : 'web';
+
+        $client = Client::create($data);
+
+        return response()->json($client->load('creator:id,name'), 201);
     }
 
     public function show(Client $client)
     {
-        return response()->json($client->load(['orders', 'sales']));
+        return response()->json($client->load(['orders', 'sales', 'clientCategory']));
     }
 
     public function update(Request $request, Client $client)
@@ -104,6 +130,7 @@ class ClientController extends Controller
             'gps_lng' => 'nullable|numeric',
             'credit_limit' => 'nullable|numeric|min:0',
             'is_active' => 'boolean',
+            'client_category_id' => 'nullable|exists:client_categories,id',
         ]);
 
         $client->update($request->all());

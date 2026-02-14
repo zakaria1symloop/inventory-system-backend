@@ -120,6 +120,11 @@ class OrderController extends Controller
 
             $order->calculateTotals();
 
+            // Auto-validate if setting is enabled
+            if (Setting::get('auto_validate_orders', 'false') === 'true') {
+                $order->confirm();
+            }
+
             DB::commit();
 
             return response()->json($order->load(['client', 'seller', 'warehouse', 'items.product.unitSale']), 201);

@@ -28,6 +28,10 @@ use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\DispenseController;
 use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\PurchaseOrderController;
+use App\Http\Controllers\Api\ClientCategoryController;
+use App\Http\Controllers\Api\CaisseController;
+use App\Http\Controllers\Api\VanSessionController;
+use App\Http\Controllers\Api\ProductRequestController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
@@ -55,6 +59,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('users', UserController::class);
     Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword']);
     Route::post('/users/{user}/toggle-active', [UserController::class, 'toggleActive']);
+    Route::post('/users/{user}/toggle-collect-debt', [UserController::class, 'toggleCollectDebt']);
     Route::get('/sellers', [UserController::class, 'getSellers']);
     Route::get('/livreurs', [UserController::class, 'getLivreurs']);
 
@@ -75,6 +80,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Products - specific routes MUST come before apiResource
     Route::get('/products/generate-barcode', [ProductController::class, 'generateBarcode']);
     Route::get('/products/available-stock/bulk', [ProductController::class, 'getAvailableStockBulk']);
+    Route::get('/products/prices-for-client', [ProductController::class, 'getPricesForClient']);
     Route::post('/products/find-by-barcode', [ProductController::class, 'findByBarcode']);
     Route::apiResource('products', ProductController::class);
     Route::get('/products/{product}/stock', [ProductController::class, 'getStock']);
@@ -82,6 +88,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Vehicles
     Route::apiResource('vehicles', VehicleController::class);
+
+    // Client Categories
+    Route::apiResource('client-categories', ClientCategoryController::class);
 
     // Clients
     Route::apiResource('clients', ClientController::class);
@@ -187,6 +196,31 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/my-deliveries', [DeliveryController::class, 'getMyDeliveries']);
     Route::get('/deliveries/{delivery}/orders/{deliveryOrder}/items', [DeliveryController::class, 'getDeliveryOrderItems']);
 
+    // Van Sales (Selling from Van)
+    Route::apiResource('van-sessions', VanSessionController::class)->except(['update']);
+    Route::put('/van-sessions/{vanSession}', [VanSessionController::class, 'update']);
+    Route::post('/van-sessions/{vanSession}/start', [VanSessionController::class, 'start']);
+    Route::post('/van-sessions/{vanSession}/complete', [VanSessionController::class, 'complete']);
+    Route::post('/van-sessions/{vanSession}/cancel', [VanSessionController::class, 'cancel']);
+    Route::post('/van-sessions/{vanSession}/sales', [VanSessionController::class, 'createSale']);
+    Route::get('/van-sessions/{vanSession}/sales', [VanSessionController::class, 'getSales']);
+    Route::get('/van-sessions/{vanSession}/products', [VanSessionController::class, 'getAvailableProducts']);
+    Route::get('/van-sessions/{vanSession}/stats', [VanSessionController::class, 'getStats']);
+    Route::get('/my-active-van-session', [VanSessionController::class, 'getActiveSession']);
+
+    // Product Requests (from cashvan drivers)
+    Route::get('/product-requests', [ProductRequestController::class, 'index']);
+    Route::get('/product-requests/pending-count', [ProductRequestController::class, 'pendingCount']);
+    Route::get('/product-requests/my', [ProductRequestController::class, 'myRequests']);
+    Route::post('/product-requests', [ProductRequestController::class, 'store']);
+    Route::get('/product-requests/{productRequest}', [ProductRequestController::class, 'show']);
+    Route::post('/product-requests/{productRequest}/approve', [ProductRequestController::class, 'approve']);
+    Route::post('/product-requests/{productRequest}/reject', [ProductRequestController::class, 'reject']);
+    Route::post('/product-requests/{productRequest}/fulfill', [ProductRequestController::class, 'fulfill']);
+
+    // Livreur Stock (Merchandise in trucks)
+    Route::get('/livreur-stock', [DeliveryController::class, 'livreurStock']);
+
     // Debtors (Clients with outstanding payments)
     Route::get('/debtors', [DeliveryController::class, 'getDebtors']);
     Route::get('/debtors/{clientId}', [DeliveryController::class, 'getClientDebt']);
@@ -261,6 +295,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/employees/{employee}', [EmployeeController::class, 'update']);
     Route::delete('/employees/{employee}', [EmployeeController::class, 'destroy']);
     Route::post('/employees/{employee}/toggle-active', [EmployeeController::class, 'toggleActive']);
+
+    // Caisses (Cash Registers)
+    Route::get('/caisses/my', [CaisseController::class, 'myCaisse']);
+    Route::get('/caisses/summary', [CaisseController::class, 'summary']);
+    Route::post('/caisses/transfer', [CaisseController::class, 'transfer']);
+    Route::get('/caisses/{id}/transactions', [CaisseController::class, 'transactions']);
+    Route::post('/caisses/{id}/settle', [CaisseController::class, 'settle']);
+    Route::get('/caisses', [CaisseController::class, 'index']);
+    Route::get('/caisses/{id}', [CaisseController::class, 'show']);
 
     // Dispenses (Expenses)
     Route::get('/dispenses', [DispenseController::class, 'index']);

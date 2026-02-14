@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Caisse;
 use App\Models\Client;
 use App\Models\Delivery;
 use App\Models\DeliveryOrder;
@@ -252,9 +253,36 @@ class DeliveryController extends Controller
 
             $delivery->updateCounts();
 
+            // Record caisse transaction for collected amount
+            if ($amountCollected > 0) {
+                $caisse = Caisse::where('user_id', $delivery->livreur_id)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'in',
+                        $amountCollected,
+                        'delivery',
+                        $deliveryOrder->id,
+                        "Livraison commande #{$deliveryOrder->order_id}",
+                        auth()->id()
+                    );
+                }
+            }
+
             DB::commit();
 
-            return response()->json($deliveryOrder->load('order'));
+            // Calculate debt info
+            $newDebt = max(0, $deliveryOrder->amount_due - $amountCollected);
+
+            // Return delivery order with client (includes updated balance) and order
+            return response()->json([
+                'delivery_order' => $deliveryOrder->fresh()->load(['client', 'order']),
+                'debt_info' => [
+                    'amount_due' => $deliveryOrder->amount_due,
+                    'amount_collected' => $amountCollected,
+                    'new_debt' => $newDebt,
+                    'client_balance' => $deliveryOrder->client ? $deliveryOrder->client->fresh()->balance : 0,
+                ],
+            ]);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json(['message' => $e->getMessage()], 500);
@@ -288,23 +316,18 @@ class DeliveryController extends Controller
                     $orderItem->quantity_delivered = $quantityDelivered;
                     $orderItem->save();
 
-                    // Calculate amount for delivered items only
-                    // (unit_price * quantity_delivered) - proportional discount
-                    $itemTotal = $orderItem->unit_price * $quantityDelivered;
-
-                    // Apply proportional discount if any (discount is per total quantity, not per unit)
-                    if ($orderItem->discount > 0 && $orderItem->quantity_confirmed > 0) {
-                        $proportionalDiscount = ($orderItem->discount / $orderItem->quantity_confirmed) * $quantityDelivered;
-                        $itemTotal -= $proportionalDiscount;
+                    // Calculate amount for delivered items using proportional subtotal
+                    // This matches the Flutter app calculation for consistency
+                    if ($orderItem->quantity_confirmed > 0 && $quantityDelivered > 0) {
+                        if ($quantityDelivered == $orderItem->quantity_confirmed) {
+                            // Full quantity - use full subtotal
+                            $itemTotal = $orderItem->subtotal;
+                        } else {
+                            // Partial quantity - calculate proportionally
+                            $itemTotal = ($orderItem->subtotal / $orderItem->quantity_confirmed) * $quantityDelivered;
+                        }
+                        $newAmountDue += $itemTotal;
                     }
-
-                    // Get tax from product if available
-                    $product = $orderItem->product;
-                    if ($product && $product->tax_percent > 0) {
-                        $itemTotal += ($itemTotal * $product->tax_percent / 100);
-                    }
-
-                    $newAmountDue += $itemTotal;
 
                     // Track delivery in delivery_stock (stock already deducted when delivery started)
                     $deliveryStock = $delivery->stock()->where('product_id', $item['product_id'])->first();
@@ -338,12 +361,15 @@ class DeliveryController extends Controller
             // Update the amount_due to reflect only delivered items
             $deliveryOrder->amount_due = $newAmountDue;
 
-            // Update money collected
-            $amountCollected = 0;
-            if ($request->has('amount_collected')) {
-                $amountCollected = $request->amount_collected;
-                $deliveryOrder->amount_collected = $amountCollected;
+            // Update money collected - handle null/missing values properly
+            $amountCollected = $request->input('amount_collected');
+            if ($amountCollected === null || $amountCollected === '') {
+                // If no amount provided, default to full amount due (same as full delivery)
+                $amountCollected = $newAmountDue;
+            } else {
+                $amountCollected = (float) $amountCollected;
             }
+            $deliveryOrder->amount_collected = $amountCollected;
 
             $deliveryOrder->save();
 
@@ -367,9 +393,33 @@ class DeliveryController extends Controller
 
             $delivery->updateCounts();
 
+            // Record caisse transaction for collected amount
+            if ($amountCollected > 0) {
+                $caisse = Caisse::where('user_id', $delivery->livreur_id)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'in',
+                        $amountCollected,
+                        'delivery',
+                        $deliveryOrder->id,
+                        "Livraison partielle commande #{$deliveryOrder->order_id}",
+                        auth()->id()
+                    );
+                }
+            }
+
             DB::commit();
 
-            return response()->json($deliveryOrder->load('order.items'));
+            // Return delivery order with client (includes updated balance) and order items
+            return response()->json([
+                'delivery_order' => $deliveryOrder->fresh()->load(['client', 'order.items']),
+                'debt_info' => [
+                    'amount_due' => $newAmountDue,
+                    'amount_collected' => $amountCollected,
+                    'new_debt' => max(0, $newAmountDue - $amountCollected),
+                    'client_balance' => $deliveryOrder->client ? $deliveryOrder->client->fresh()->balance : 0,
+                ],
+            ]);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json(['message' => $e->getMessage()], 500);
@@ -563,6 +613,19 @@ class DeliveryController extends Controller
                 $client->updateBalance($amount, 'subtract');
             }
 
+            // Record caisse transaction
+            $caisse = Caisse::where('user_id', auth()->id())->first();
+            if ($caisse) {
+                $caisse->addTransaction(
+                    'in',
+                    $amount,
+                    'delivery',
+                    $deliveryOrder->id,
+                    "تحصيل دين توصيل #{$deliveryOrder->order_id}",
+                    auth()->id()
+                );
+            }
+
             DB::commit();
 
             return response()->json([
@@ -666,6 +729,149 @@ class DeliveryController extends Controller
                 'total_due' => $orders->sum('amount_due'),
                 'total_collected' => $orders->sum('amount_collected'),
                 'total_remaining' => $orders->sum('amount_remaining'),
+            ],
+        ]);
+    }
+
+    /**
+     * Livreur stock status - merchandise currently in trucks
+     */
+    public function livreurStock(Request $request)
+    {
+        $user = auth()->user();
+
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        // Active deliveries (preparing + in_progress)
+        $activeDeliveries = Delivery::with([
+            'livreur:id,name,phone,role',
+            'vehicle:id,name,plate_number',
+            'stock.product:id,name,barcode,retail_price,cost_price',
+        ])
+            ->whereIn('status', ['preparing', 'in_progress'])
+            ->get();
+
+        // Active van sessions (preparing + active)
+        $activeVanSessions = \App\Models\VanSession::with([
+            'livreur:id,name,phone,role',
+            'vehicle:id,name,plate_number',
+            'items.product:id,name,barcode,retail_price,cost_price',
+        ])
+            ->whereIn('status', ['preparing', 'active'])
+            ->get();
+
+        // Group by livreur
+        $livreurMap = [];
+
+        foreach ($activeDeliveries as $delivery) {
+            $lid = $delivery->livreur_id;
+            if (!isset($livreurMap[$lid])) {
+                $livreurMap[$lid] = [
+                    'user' => $delivery->livreur,
+                    'deliveries' => [],
+                    'van_sessions' => [],
+                ];
+            }
+
+            $stockItems = $delivery->stock->map(function ($s) {
+                $remaining = $s->quantity_loaded - $s->quantity_delivered - $s->quantity_returned;
+                return [
+                    'product_id' => $s->product_id,
+                    'product' => $s->product,
+                    'quantity_loaded' => (float) $s->quantity_loaded,
+                    'quantity_delivered' => (float) $s->quantity_delivered,
+                    'quantity_returned' => (float) $s->quantity_returned,
+                    'remaining' => (float) $remaining,
+                ];
+            });
+
+            $livreurMap[$lid]['deliveries'][] = [
+                'id' => $delivery->id,
+                'reference' => $delivery->reference,
+                'status' => $delivery->status,
+                'date' => $delivery->date,
+                'vehicle' => $delivery->vehicle,
+                'total_orders' => $delivery->total_orders,
+                'delivered_count' => $delivery->delivered_count,
+                'failed_count' => $delivery->failed_count,
+                'total_amount' => (float) $delivery->total_amount,
+                'collected_amount' => (float) $delivery->collected_amount,
+                'stock' => $stockItems,
+            ];
+        }
+
+        foreach ($activeVanSessions as $session) {
+            $lid = $session->livreur_id;
+            if (!isset($livreurMap[$lid])) {
+                $livreurMap[$lid] = [
+                    'user' => $session->livreur,
+                    'deliveries' => [],
+                    'van_sessions' => [],
+                ];
+            }
+
+            $items = $session->items->map(function ($i) {
+                $available = $i->quantity_loaded - $i->quantity_sold - $i->quantity_returned;
+                return [
+                    'product_id' => $i->product_id,
+                    'product' => $i->product,
+                    'quantity_loaded' => (float) $i->quantity_loaded,
+                    'quantity_sold' => (float) $i->quantity_sold,
+                    'quantity_returned' => (float) $i->quantity_returned,
+                    'available' => (float) $available,
+                ];
+            });
+
+            $livreurMap[$lid]['van_sessions'][] = [
+                'id' => $session->id,
+                'reference' => $session->reference,
+                'status' => $session->status,
+                'date' => $session->date,
+                'vehicle' => $session->vehicle,
+                'total_loaded_value' => (float) $session->total_loaded_value,
+                'total_sales' => (float) $session->total_sales,
+                'total_collected' => (float) $session->total_collected,
+                'sales_count' => $session->sales_count,
+                'items' => $items,
+            ];
+        }
+
+        // Compute per-livreur totals
+        $livreurs = collect($livreurMap)->values()->map(function ($entry) {
+            $totalLoaded = 0;
+            $totalRemaining = 0;
+
+            foreach ($entry['deliveries'] as $d) {
+                foreach ($d['stock'] as $s) {
+                    $totalLoaded += $s['quantity_loaded'];
+                    $totalRemaining += $s['remaining'];
+                }
+            }
+            foreach ($entry['van_sessions'] as $v) {
+                foreach ($v['items'] as $i) {
+                    $totalLoaded += $i['quantity_loaded'];
+                    $totalRemaining += $i['available'];
+                }
+            }
+
+            $entry['totals'] = [
+                'total_loaded' => $totalLoaded,
+                'total_remaining' => $totalRemaining,
+            ];
+
+            return $entry;
+        });
+
+        return response()->json([
+            'livreurs' => $livreurs,
+            'summary' => [
+                'total_active_livreurs' => $livreurs->count(),
+                'total_active_deliveries' => $activeDeliveries->count(),
+                'total_active_van_sessions' => $activeVanSessions->count(),
+                'total_products_loaded' => $livreurs->sum('totals.total_loaded'),
+                'total_products_remaining' => $livreurs->sum('totals.total_remaining'),
             ],
         ]);
     }

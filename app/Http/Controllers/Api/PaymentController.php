@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Caisse;
 use App\Models\Client;
 use App\Models\Payment;
 use App\Models\Purchase;
@@ -135,6 +136,19 @@ class PaymentController extends Controller
 
             // Update client balance
             $client->updateBalance($request->amount, 'subtract');
+
+            // Record caisse transaction
+            $caisse = Caisse::where('user_id', auth()->id())->first();
+            if ($caisse) {
+                $caisse->addTransaction(
+                    'in',
+                    $request->amount,
+                    'payment',
+                    $payment->id,
+                    "Paiement client {$client->name}",
+                    auth()->id()
+                );
+            }
 
             DB::commit();
 

@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Client;
 use App\Models\Product;
+use App\Models\ProductCategoryPrice;
 use App\Models\Stock;
 use Illuminate\Http\Request;
 
@@ -15,13 +17,13 @@ class ProductController extends Controller
 
         // Eager load stock for specific warehouse if provided
         if ($warehouseId) {
-            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale',
+            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'categoryPrices',
                 'stock' => function ($q) use ($warehouseId) {
                     $q->where('warehouse_id', $warehouseId);
                 }
             ]);
         } else {
-            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'stock']);
+            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'stock', 'categoryPrices']);
         }
 
         if ($request->search) {
@@ -77,7 +79,7 @@ class ProductController extends Controller
             'unit_sale_id' => 'nullable|exists:units,id',
             'barcode' => 'nullable|unique:products',
             'cost_price' => 'required|numeric|min:0',
-            'retail_price' => 'required|numeric|min:0',
+            'retail_price' => 'nullable|numeric|min:0',
             'wholesale_price' => 'nullable|numeric|min:0',
             'min_selling_price' => 'nullable|numeric|min:0',
             'tax_percent' => 'nullable|numeric|min:0|max:100',
@@ -90,7 +92,12 @@ class ProductController extends Controller
             'image' => 'nullable|image|max:2048',
         ]);
 
-        $data = $request->except(['image', 'warehouse_id', 'opening_stock']);
+        $data = $request->except(['image', 'warehouse_id', 'opening_stock', 'category_prices']);
+
+        // Default price fields to 0 if not provided
+        $data['retail_price'] = $data['retail_price'] ?? 0;
+        $data['wholesale_price'] = $data['wholesale_price'] ?? 0;
+        $data['min_selling_price'] = $data['min_selling_price'] ?? 0;
 
         if ($request->hasFile('image')) {
             $data['image'] = $request->file('image')->store('products', 'public');
@@ -106,12 +113,25 @@ class ProductController extends Controller
             ]);
         }
 
-        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale']), 201);
+        // Save category prices
+        if ($request->has('category_prices') && is_array($request->category_prices)) {
+            foreach ($request->category_prices as $cp) {
+                if (!empty($cp['client_category_id']) && isset($cp['price']) && $cp['price'] !== null && $cp['price'] !== '') {
+                    ProductCategoryPrice::create([
+                        'product_id' => $product->id,
+                        'client_category_id' => $cp['client_category_id'],
+                        'price' => $cp['price'],
+                    ]);
+                }
+            }
+        }
+
+        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'categoryPrices']), 201);
     }
 
     public function show(Product $product)
     {
-        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'stock.warehouse']));
+        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'stock.warehouse', 'categoryPrices']));
     }
 
     public function update(Request $request, Product $product)
@@ -135,7 +155,7 @@ class ProductController extends Controller
             'image' => 'nullable|image|max:2048',
         ]);
 
-        $data = $request->except(['image']);
+        $data = $request->except(['image', 'category_prices']);
 
         if ($request->hasFile('image')) {
             $data['image'] = $request->file('image')->store('products', 'public');
@@ -143,7 +163,21 @@ class ProductController extends Controller
 
         $product->update($data);
 
-        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale']));
+        // Update category prices
+        if ($request->has('category_prices') && is_array($request->category_prices)) {
+            $product->categoryPrices()->delete();
+            foreach ($request->category_prices as $cp) {
+                if (!empty($cp['client_category_id']) && isset($cp['price']) && $cp['price'] !== null && $cp['price'] !== '') {
+                    ProductCategoryPrice::create([
+                        'product_id' => $product->id,
+                        'client_category_id' => $cp['client_category_id'],
+                        'price' => $cp['price'],
+                    ]);
+                }
+            }
+        }
+
+        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'categoryPrices']));
     }
 
     public function destroy(Product $product)
@@ -269,5 +303,32 @@ class ProductController extends Controller
         });
 
         return response()->json($result);
+    }
+
+    /**
+     * Get product prices for a specific client based on their category
+     */
+    public function getPricesForClient(Request $request)
+    {
+        $request->validate([
+            'client_id' => 'required|exists:clients,id',
+        ]);
+
+        $client = Client::find($request->client_id);
+        $categoryId = $client->client_category_id;
+
+        $prices = [];
+
+        if ($categoryId) {
+            $categoryPrices = ProductCategoryPrice::where('client_category_id', $categoryId)->get();
+            foreach ($categoryPrices as $cp) {
+                $prices[$cp->product_id] = (float) $cp->price;
+            }
+        }
+
+        return response()->json([
+            'client_category_id' => $categoryId,
+            'prices' => $prices,
+        ]);
     }
 }

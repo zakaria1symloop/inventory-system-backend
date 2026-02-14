@@ -19,32 +19,17 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
-        // Create admin user
+        // Seed client categories
+        $this->call(ClientCategorySeeder::class);
+
+        // Seed caisses will run at the end after users are created
+
+        // Create admin user (demo credentials)
         User::create([
             'name' => 'المدير',
-            'email' => 'admin@admin.com',
-            'password' => Hash::make('password'),
+            'email' => 'admin@demo.com',
+            'password' => Hash::make('demo1234'),
             'role' => 'admin',
-            'is_active' => true,
-        ]);
-
-        // Create seller
-        User::create([
-            'name' => 'البائع',
-            'email' => 'seller@admin.com',
-            'password' => Hash::make('password'),
-            'phone' => '0555000001',
-            'role' => 'seller',
-            'is_active' => true,
-        ]);
-
-        // Create livreur
-        User::create([
-            'name' => 'السائق',
-            'email' => 'livreur@admin.com',
-            'password' => Hash::make('password'),
-            'phone' => '0555000002',
-            'role' => 'livreur',
             'is_active' => true,
         ]);
 
@@ -164,5 +149,8 @@ class DatabaseSeeder extends Seeder
         // Create vehicles
         Vehicle::create(['name' => 'شاحنة 1', 'plate_number' => '00001-100-07', 'is_active' => true]);
         Vehicle::create(['name' => 'شاحنة 2', 'plate_number' => '00002-100-07', 'is_active' => true]);
+
+        // Create caisses for all users
+        $this->call(CaisseSeeder::class);
     }
 }

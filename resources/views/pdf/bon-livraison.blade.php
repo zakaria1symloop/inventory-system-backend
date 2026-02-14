@@ -286,7 +286,17 @@ use App\Helpers\ArabicHelper;
                 <td class="text-left">
                     <strong>{{ ArabicHelper::safe($productName, 'Produit') }}</strong>
                 </td>
-                <td class="qty-cell">{{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}</td>
+                <td class="qty-cell">
+                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                        @php
+                            $cartons = floor($qty);
+                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                        @endphp
+                        {{ $cartons }} + {{ $extraPieces }}ق
+                    @else
+                        {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
+                    @endif
+                </td>
                 <td class="text-center">
                     {{ $unitName }}
                     @if($piecesPerPkg > 1)
@@ -294,7 +304,12 @@ use App\Helpers\ArabicHelper;
                     @endif
                 </td>
                 <td class="text-center"><strong>{{ number_format($nbPieces, $nbPieces == floor($nbPieces) ? 0 : 2) }}</strong></td>
-                <td class="text-right">{{ number_format($unitPrice, 2) }}</td>
+                <td class="text-right">
+                    {{ number_format($unitPrice, 2) }}
+                    @if($piecesPerPkg > 1)
+                    <br><span class="unit-info">({{ number_format($unitPrice * $piecesPerPkg, 2) }}/crt)</span>
+                    @endif
+                </td>
                 <td class="text-right"><strong>{{ number_format($lineTotal, 2) }}</strong></td>
             </tr>
             @endforeach

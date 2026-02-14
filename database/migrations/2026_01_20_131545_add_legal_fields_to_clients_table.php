@@ -12,11 +12,21 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('clients', function (Blueprint $table) {
-            $table->string('rc')->nullable()->after('is_active');
-            $table->string('nif')->nullable()->after('rc');
-            $table->string('ai')->nullable()->after('nif');
-            $table->string('nis')->nullable()->after('ai');
-            $table->string('rib')->nullable()->after('nis');
+            if (!Schema::hasColumn('clients', 'rc')) {
+                $table->string('rc')->nullable()->after('is_active');
+            }
+            if (!Schema::hasColumn('clients', 'nif')) {
+                $table->string('nif')->nullable()->after('rc');
+            }
+            if (!Schema::hasColumn('clients', 'ai')) {
+                $table->string('ai')->nullable()->after('nif');
+            }
+            if (!Schema::hasColumn('clients', 'nis')) {
+                $table->string('nis')->nullable()->after('ai');
+            }
+            if (!Schema::hasColumn('clients', 'rib')) {
+                $table->string('rib')->nullable()->after('nis');
+            }
         });
     }
 

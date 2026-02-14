@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Caisse;
 use App\Models\Dispense;
 use Illuminate\Http\Request;
 
@@ -57,6 +58,19 @@ class DispenseController extends Controller
 
         $dispense = Dispense::create($validated);
         $dispense->load(['employee:id,name', 'user:id,name']);
+
+        // Record caisse transaction
+        $caisse = Caisse::where('user_id', auth()->id())->first();
+        if ($caisse) {
+            $caisse->addTransaction(
+                'out',
+                $validated['amount'],
+                'dispense',
+                $dispense->id,
+                "Dépense: {$dispense->description}",
+                auth()->id()
+            );
+        }
 
         return response()->json([
             'message' => 'تم إضافة المصروف بنجاح',

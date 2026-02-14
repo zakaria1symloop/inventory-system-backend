@@ -6,38 +6,35 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-class Sale extends Model
+class VanSale extends Model
 {
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
         'reference',
+        'van_session_id',
         'client_id',
-        'warehouse_id',
-        'user_id',
-        'date',
+        'sale_time',
         'total_amount',
         'discount',
-        'tax',
-        'shipping',
         'grand_total',
         'paid_amount',
         'due_amount',
-        'status',
         'payment_status',
-        'note',
-        'source',
+        'latitude',
+        'longitude',
+        'notes',
     ];
 
     protected $casts = [
-        'date' => 'date',
+        'sale_time' => 'datetime',
         'total_amount' => 'decimal:2',
         'discount' => 'decimal:2',
-        'tax' => 'decimal:2',
-        'shipping' => 'decimal:2',
         'grand_total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
+        'latitude' => 'decimal:7',
+        'longitude' => 'decimal:7',
     ];
 
     protected static function boot()
@@ -48,12 +45,15 @@ class Sale extends Model
             if (!$model->reference) {
                 $model->reference = self::generateReference();
             }
+            if (!$model->sale_time) {
+                $model->sale_time = now();
+            }
         });
     }
 
     public static function generateReference()
     {
-        $prefix = 'SAL';
+        $prefix = 'VS';
         $date = now()->format('Ymd');
         $last = self::whereDate('created_at', today())->latest()->first();
         $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
@@ -61,54 +61,25 @@ class Sale extends Model
         return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
     }
 
+    public function vanSession()
+    {
+        return $this->belongsTo(VanSession::class);
+    }
+
     public function client()
     {
         return $this->belongsTo(Client::class);
     }
 
-    public function warehouse()
-    {
-        return $this->belongsTo(Warehouse::class);
-    }
-
-    public function user()
-    {
-        return $this->belongsTo(User::class);
-    }
-
     public function items()
     {
-        return $this->hasMany(SaleItem::class);
-    }
-
-    public function returns()
-    {
-        return $this->hasMany(SaleReturn::class);
-    }
-
-    public function payments()
-    {
-        return $this->morphMany(Payment::class, 'payable');
+        return $this->hasMany(VanSaleItem::class);
     }
 
     public function calculateTotals()
     {
-        // Calculate totals from items
-        // unit_price is price per 1 piece, multiply by pieces_per_package
-        $totalAmount = 0;
-        foreach ($this->items()->with('product')->get() as $item) {
-            $piecesPerPackage = $item->product->pieces_per_package ?? 1;
-            // subtotal = unit_price × pieces_per_package × quantity - discount + tax
-            $subtotal = ($item->unit_price * $piecesPerPackage * $item->quantity) - $item->discount + $item->tax;
-            if ($item->subtotal != $subtotal) {
-                $item->subtotal = $subtotal;
-                $item->save();
-            }
-            $totalAmount += $subtotal;
-        }
-
-        $this->total_amount = $totalAmount;
-        $this->grand_total = $this->total_amount - $this->discount + $this->tax + $this->shipping;
+        $this->total_amount = $this->items()->sum('subtotal');
+        $this->grand_total = $this->total_amount - $this->discount;
         $this->due_amount = $this->grand_total - $this->paid_amount;
         $this->payment_status = $this->calculatePaymentStatus();
         $this->save();
@@ -118,8 +89,7 @@ class Sale extends Model
     {
         if ($this->paid_amount >= $this->grand_total) {
             return 'paid';
-        }
-        if ($this->paid_amount > 0) {
+        } elseif ($this->paid_amount > 0) {
             return 'partial';
         }
         return 'unpaid';

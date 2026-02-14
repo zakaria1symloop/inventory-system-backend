@@ -263,8 +263,23 @@ use App\Helpers\ArabicHelper;
                     <br><small style="color: #666;">({{ $piecesPerPkg }} pcs)</small>
                     @endif
                 </td>
-                <td class="text-center">{{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}</td>
-                <td class="text-center">{{ number_format($unitPrice, 2) }}</td>
+                <td class="text-center">
+                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                        @php
+                            $cartons = floor($qty);
+                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                        @endphp
+                        {{ $cartons }} + {{ $extraPieces }}ق
+                    @else
+                        {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
+                    @endif
+                </td>
+                <td class="text-center">
+                    {{ number_format($unitPrice, 2) }}
+                    @if($piecesPerPkg > 1)
+                    <br><small style="color: #666;">({{ number_format($unitPrice * $piecesPerPkg, 2) }}/crt)</small>
+                    @endif
+                </td>
                 <td class="text-center">{{ number_format($itemDiscount, 2) }}</td>
                 <td class="text-right">{{ number_format($subtotal, 2) }} DA</td>
             </tr>

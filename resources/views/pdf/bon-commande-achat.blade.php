@@ -278,10 +278,25 @@ use App\Helpers\ArabicHelper;
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
                 <td class="text-left">{{ ArabicHelper::safe($productName, 'Produit') }}</td>
-                <td class="text-center" style="font-size: 12px; font-weight: bold; color: #065f46;">{{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}</td>
+                <td class="text-center" style="font-size: 12px; font-weight: bold; color: #065f46;">
+                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                        @php
+                            $cartons = floor($qty);
+                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                        @endphp
+                        {{ $cartons }} + {{ $extraPieces }}ق
+                    @else
+                        {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
+                    @endif
+                </td>
                 <td class="text-center">{{ number_format($piecesPerPkg, 2) }}</td>
                 <td class="text-center" style="font-weight: bold;">{{ number_format($itemTotalPieces, 2) }}</td>
-                <td class="text-right">{{ number_format($unitPrice, 2) }}</td>
+                <td class="text-right">
+                    {{ number_format($unitPrice, 2) }}
+                    @if($piecesPerPkg > 1)
+                    <br><span style="font-size: 7px; color: #666;">({{ number_format($unitPrice * $piecesPerPkg, 2) }}/crt)</span>
+                    @endif
+                </td>
                 <td class="text-right" style="font-weight: bold;">{{ number_format($subtotal, 2) }}</td>
             </tr>
             @endforeach

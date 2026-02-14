@@ -20,6 +20,7 @@ class User extends Authenticatable
         'avatar',
         'role',
         'is_active',
+        'can_collect_debt',
         'latitude',
         'longitude',
         'last_location_at',
@@ -36,6 +37,7 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'is_active' => 'boolean',
+            'can_collect_debt' => 'boolean',
             'latitude' => 'decimal:8',
             'longitude' => 'decimal:8',
             'last_location_at' => 'datetime',
@@ -60,6 +62,11 @@ class User extends Authenticatable
     public function isLivreur(): bool
     {
         return $this->role === 'livreur';
+    }
+
+    public function isCashvan(): bool
+    {
+        return $this->role === 'cashvan';
     }
 
     public function trips()
@@ -95,5 +102,29 @@ class User extends Authenticatable
     public function syncLogs()
     {
         return $this->hasMany(SyncLog::class);
+    }
+
+    public function caisse()
+    {
+        return $this->hasOne(Caisse::class);
+    }
+
+    protected static function booted(): void
+    {
+        static::created(function (User $user) {
+            $typeMap = [
+                'seller' => 'vendeur',
+                'livreur' => 'livreur',
+                'cashvan' => 'cashvan',
+                'admin' => 'principale',
+            ];
+
+            if (isset($typeMap[$user->role])) {
+                Caisse::create([
+                    'user_id' => $user->id,
+                    'type' => $typeMap[$user->role],
+                ]);
+            }
+        });
     }
 }

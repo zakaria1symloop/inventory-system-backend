@@ -47,6 +47,10 @@ class SaleController extends Controller
             $query->where('reference', 'like', "%{$request->search}%");
         }
 
+        if ($request->source) {
+            $query->where('source', $request->source);
+        }
+
         $sales = $query->latest()->paginate($request->per_page ?? 15);
 
         return response()->json($sales);
@@ -87,6 +91,10 @@ class SaleController extends Controller
                 }
             }
 
+            // Auto-detect source based on user role
+            $role = auth()->user()->role;
+            $source = in_array($role, ['seller', 'livreur']) ? 'app' : 'web';
+
             $sale = Sale::create([
                 'client_id' => $request->client_id,
                 'warehouse_id' => $request->warehouse_id,
@@ -97,6 +105,7 @@ class SaleController extends Controller
                 'shipping' => $request->shipping ?? 0,
                 'note' => $request->note,
                 'status' => 'completed',
+                'source' => $source,
             ]);
 
             foreach ($request->items as $item) {

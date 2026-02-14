@@ -102,6 +102,26 @@ class Product extends Model
         return $this->hasMany(AdjustmentItem::class);
     }
 
+    public function categoryPrices()
+    {
+        return $this->hasMany(ProductCategoryPrice::class);
+    }
+
+    public function getPriceForCategory($clientCategoryId)
+    {
+        if ($clientCategoryId) {
+            $categoryPrice = $this->categoryPrices()
+                ->where('client_category_id', $clientCategoryId)
+                ->first();
+
+            if ($categoryPrice) {
+                return (float) $categoryPrice->price;
+            }
+        }
+
+        return (float) ($this->wholesale_price ?: $this->retail_price);
+    }
+
     public function scopeActive($query)
     {
         return $query->where('is_active', true);
