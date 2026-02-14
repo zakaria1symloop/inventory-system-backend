@@ -32,6 +32,7 @@ use App\Http\Controllers\Api\ClientCategoryController;
 use App\Http\Controllers\Api\CaisseController;
 use App\Http\Controllers\Api\VanSessionController;
 use App\Http\Controllers\Api\ProductRequestController;
+use App\Http\Controllers\Api\StockTransferController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
@@ -217,6 +218,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/product-requests/{productRequest}/approve', [ProductRequestController::class, 'approve']);
     Route::post('/product-requests/{productRequest}/reject', [ProductRequestController::class, 'reject']);
     Route::post('/product-requests/{productRequest}/fulfill', [ProductRequestController::class, 'fulfill']);
+
+    // Stock Transfers (Cashvan)
+    Route::apiResource('stock-transfers', StockTransferController::class)->except(['update']);
+    Route::post('/stock-transfers/{stockTransfer}/collect', [StockTransferController::class, 'collect']);
+    Route::get('/my-pending-transfers', [StockTransferController::class, 'myPendingTransfers']);
+    Route::get('/my-stock', [StockTransferController::class, 'myStock']);
+    Route::get('/my-sales', [StockTransferController::class, 'mySales']);
 
     // Livreur Stock (Merchandise in trucks)
     Route::get('/livreur-stock', [DeliveryController::class, 'livreurStock']);

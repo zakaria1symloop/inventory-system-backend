@@ -38,6 +38,7 @@ class StockMovement extends Model
     const TYPE_SALE_RETURN = 'sale_return';
     const TYPE_ADJUSTMENT = 'adjustment';
     const TYPE_TRANSFER = 'transfer';
+    const TYPE_TRANSFER_IN = 'transfer_in';
     const TYPE_DELIVERY = 'delivery';
     const TYPE_DELIVERY_OUT = 'delivery_out';
     const TYPE_DELIVERY_RETURN = 'delivery_return';
@@ -76,7 +77,7 @@ class StockMovement extends Model
         );
 
         $quantityBefore = $stock->quantity;
-        $quantityChange = in_array($type, [self::TYPE_PURCHASE, self::TYPE_SALE_RETURN, self::TYPE_DELIVERY_RETURN, self::TYPE_VAN_RETURN, self::TYPE_OPENING])
+        $quantityChange = in_array($type, [self::TYPE_PURCHASE, self::TYPE_SALE_RETURN, self::TYPE_DELIVERY_RETURN, self::TYPE_VAN_RETURN, self::TYPE_OPENING, self::TYPE_TRANSFER_IN])
             || ($type === self::TYPE_ADJUSTMENT && $quantity > 0)
             ? abs($quantity)
             : -abs($quantity);
@@ -152,7 +153,8 @@ class StockMovement extends Model
             self::TYPE_SALE => 'بيع',
             self::TYPE_SALE_RETURN => 'مرتجع بيع',
             self::TYPE_ADJUSTMENT => 'تعديل',
-            self::TYPE_TRANSFER => 'نقل',
+            self::TYPE_TRANSFER => 'تحويل خروج',
+            self::TYPE_TRANSFER_IN => 'تحويل دخول',
             self::TYPE_DELIVERY => 'توصيل',
             self::TYPE_DELIVERY_OUT => 'خروج للتوصيل',
             self::TYPE_DELIVERY_RETURN => 'مرتجع توصيل',

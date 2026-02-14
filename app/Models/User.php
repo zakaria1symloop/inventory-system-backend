@@ -21,6 +21,7 @@ class User extends Authenticatable
         'role',
         'is_active',
         'can_collect_debt',
+        'warehouse_id',
         'latitude',
         'longitude',
         'last_location_at',
@@ -104,6 +105,11 @@ class User extends Authenticatable
         return $this->hasMany(SyncLog::class);
     }
 
+    public function warehouse()
+    {
+        return $this->belongsTo(Warehouse::class);
+    }
+
     public function caisse()
     {
         return $this->hasOne(Caisse::class);
@@ -112,6 +118,7 @@ class User extends Authenticatable
     protected static function booted(): void
     {
         static::created(function (User $user) {
+            // Auto-create caisse
             $typeMap = [
                 'seller' => 'vendeur',
                 'livreur' => 'livreur',
@@ -124,6 +131,17 @@ class User extends Authenticatable
                     'user_id' => $user->id,
                     'type' => $typeMap[$user->role],
                 ]);
+            }
+
+            // Auto-create warehouse for cashvan drivers
+            if ($user->role === 'cashvan' && !$user->warehouse_id) {
+                $warehouse = Warehouse::create([
+                    'name' => 'مستودع ' . $user->name,
+                    'is_main' => false,
+                    'is_active' => true,
+                ]);
+                $user->warehouse_id = $warehouse->id;
+                $user->saveQuietly();
             }
         });
     }
