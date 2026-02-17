@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 
 class StockTransfer extends Model
 {
@@ -48,9 +49,14 @@ class StockTransfer extends Model
     {
         $prefix = 'TRF';
         $date = now()->format('Ymd');
-        $last = self::where('reference', 'like', $prefix . $date . '%')
+
+        // Use DB::table to bypass SoftDeletes and avoid race conditions
+        $last = DB::table('stock_transfers')
+            ->where('reference', 'like', $prefix . $date . '%')
             ->orderByRaw('CAST(SUBSTRING(reference, -4) AS UNSIGNED) DESC')
+            ->lockForUpdate()
             ->first();
+
         $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
 
         return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
