@@ -40,6 +40,16 @@ class Sale extends Model
         'due_amount' => 'decimal:2',
     ];
 
+    protected $appends = ['total_cost'];
+
+    public function getTotalCostAttribute()
+    {
+        return $this->items->sum(function ($item) {
+            $ppp = $item->product->pieces_per_package ?? 1;
+            return ($item->cost_price ?? 0) * $ppp * $item->quantity;
+        });
+    }
+
     protected static function boot()
     {
         parent::boot();

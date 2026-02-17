@@ -91,6 +91,10 @@ class CaisseController extends Controller
             $query->where('source_type', $request->source_type);
         }
 
+        if ($request->created_by) {
+            $query->where('created_by', $request->created_by);
+        }
+
         if ($request->from_date) {
             $query->whereDate('created_at', '>=', $request->from_date);
         }
@@ -101,7 +105,26 @@ class CaisseController extends Controller
 
         $transactions = $query->latest()->paginate($request->per_page ?? 20);
 
-        return response()->json($transactions);
+        // Include totals for current filters
+        $totalsQuery = $caisse->transactions();
+        if ($request->type) $totalsQuery->where('type', $request->type);
+        if ($request->source_type) $totalsQuery->where('source_type', $request->source_type);
+        if ($request->created_by) $totalsQuery->where('created_by', $request->created_by);
+        if ($request->from_date) $totalsQuery->whereDate('created_at', '>=', $request->from_date);
+        if ($request->to_date) $totalsQuery->whereDate('created_at', '<=', $request->to_date);
+
+        $allFiltered = $totalsQuery->get();
+        $totalIn = $allFiltered->where('type', 'in')->sum('amount');
+        $totalOut = $allFiltered->where('type', 'out')->sum('amount');
+
+        $response = $transactions->toArray();
+        $response['totals'] = [
+            'total_in' => $totalIn,
+            'total_out' => $totalOut,
+            'net' => $totalIn - $totalOut,
+        ];
+
+        return response()->json($response);
     }
 
     /**

@@ -12,6 +12,10 @@ use App\Models\DeliveryStock;
 use App\Models\Order;
 use App\Models\Stock;
 use App\Models\StockMovement;
+use App\Models\User;
+use App\Models\VanReturn;
+use App\Models\VanSession;
+use App\Models\Warehouse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -838,6 +842,92 @@ class DeliveryController extends Controller
             ];
         }
 
+        // Users with assigned warehouses (cashvan drivers via stock transfers)
+        $warehouseUsers = \App\Models\User::whereNotNull('warehouse_id')
+            ->where('is_active', true)
+            ->whereIn('role', ['seller', 'livreur', 'cashvan'])
+            ->with(['warehouse:id,name'])
+            ->get();
+
+        foreach ($warehouseUsers as $wUser) {
+            $lid = $wUser->id;
+            if (isset($livreurMap[$lid])) continue; // already listed via delivery/van session
+
+            $stocks = \App\Models\Stock::with('product:id,name,barcode,retail_price,cost_price,pieces_per_package')
+                ->where('warehouse_id', $wUser->warehouse_id)
+                ->where('quantity', '>', 0)
+                ->get();
+
+            // Get today's sales for this user
+            $todaySales = \App\Models\Sale::where('user_id', $wUser->id)
+                ->where('warehouse_id', $wUser->warehouse_id)
+                ->whereDate('date', now()->toDateString())
+                ->get();
+
+            // Get today's sold quantities per product
+            $soldByProduct = \App\Models\SaleItem::whereIn('sale_id', $todaySales->pluck('id'))
+                ->selectRaw('product_id, SUM(quantity) as total_sold')
+                ->groupBy('product_id')
+                ->pluck('total_sold', 'product_id');
+
+            // Build items: current stock + sold today = original loaded
+            // Collect all product_ids (from stock + sold)
+            $allProductIds = $stocks->pluck('product_id')->merge($soldByProduct->keys())->unique();
+
+            // Load products for sold-only items (not in current stock)
+            $soldOnlyIds = $soldByProduct->keys()->diff($stocks->pluck('product_id'));
+            $soldOnlyProducts = $soldOnlyIds->isNotEmpty()
+                ? \App\Models\Product::whereIn('id', $soldOnlyIds)->get(['id', 'name', 'barcode', 'retail_price', 'cost_price', 'pieces_per_package'])->keyBy('id')
+                : collect();
+
+            $stockItems = collect();
+
+            foreach ($stocks as $s) {
+                $sold = (float) ($soldByProduct[$s->product_id] ?? 0);
+                $available = (float) $s->quantity;
+                $loaded = $available + $sold;
+                $stockItems->push([
+                    'product_id' => $s->product_id,
+                    'product' => $s->product,
+                    'quantity_loaded' => $loaded,
+                    'quantity_sold' => $sold,
+                    'quantity_returned' => 0,
+                    'available' => $available,
+                ]);
+            }
+
+            // Add products that were fully sold (no remaining stock)
+            foreach ($soldOnlyIds as $pid) {
+                $sold = (float) $soldByProduct[$pid];
+                $product = $soldOnlyProducts[$pid] ?? null;
+                if ($product) {
+                    $stockItems->push([
+                        'product_id' => $pid,
+                        'product' => $product,
+                        'quantity_loaded' => $sold,
+                        'quantity_sold' => $sold,
+                        'quantity_returned' => 0,
+                        'available' => 0,
+                    ]);
+                }
+            }
+
+            if ($stockItems->isEmpty() && $todaySales->isEmpty()) continue;
+
+            $livreurMap[$lid] = [
+                'user' => $wUser->only(['id', 'name', 'phone', 'role']),
+                'deliveries' => [],
+                'van_sessions' => [],
+                'warehouse_stock' => [
+                    'warehouse' => $wUser->warehouse,
+                    'items' => $stockItems->values(),
+                    'sales_count' => $todaySales->count(),
+                    'total_sales' => (float) $todaySales->sum('grand_total'),
+                    'total_collected' => (float) $todaySales->sum('paid_amount'),
+                ],
+            ];
+        }
+
         // Compute per-livreur totals
         $livreurs = collect($livreurMap)->values()->map(function ($entry) {
             $totalLoaded = 0;
@@ -851,6 +941,12 @@ class DeliveryController extends Controller
             }
             foreach ($entry['van_sessions'] as $v) {
                 foreach ($v['items'] as $i) {
+                    $totalLoaded += $i['quantity_loaded'];
+                    $totalRemaining += $i['available'];
+                }
+            }
+            if (isset($entry['warehouse_stock'])) {
+                foreach ($entry['warehouse_stock']['items'] as $i) {
                     $totalLoaded += $i['quantity_loaded'];
                     $totalRemaining += $i['available'];
                 }
@@ -965,6 +1061,202 @@ class DeliveryController extends Controller
             'data' => $debtors,
             'totals' => $totals,
         ]);
+    }
+
+    /**
+     * Return stock from a livreur back to a warehouse
+     */
+    public function returnStock(Request $request, $userId)
+    {
+        $user = auth()->user();
+
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        $request->validate([
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.source_type' => 'required|in:delivery,van_session,warehouse_stock',
+            'items.*.source_id' => 'nullable|integer',
+        ]);
+
+        $targetUser = User::findOrFail($userId);
+        $targetWarehouse = Warehouse::findOrFail($request->warehouse_id);
+
+        // Helper to format qty as cartons+pieces for human-readable errors
+        $formatQty = function ($qty, $piecesPerPackage) {
+            $ppp = $piecesPerPackage ?: 1;
+            if ($ppp <= 1) return "{$qty}";
+            $cartons = floor($qty);
+            $pieces = round(($qty - $cartons) * $ppp);
+            if ($cartons > 0 && $pieces > 0) return "{$cartons} كرتون {$pieces} قطعة";
+            if ($cartons > 0) return "{$cartons} كرتون";
+            if ($pieces > 0) return "{$pieces} قطعة";
+            return '0';
+        };
+
+        DB::beginTransaction();
+
+        try {
+            $processed = [];
+
+            foreach ($request->items as $item) {
+                $productId = $item['product_id'];
+                $quantity = (float) $item['quantity'];
+                $sourceType = $item['source_type'];
+                $sourceId = $item['source_id'] ?? null;
+                $product = \App\Models\Product::find($productId);
+                $productName = $product->name ?? "منتج #{$productId}";
+                $ppp = $product->pieces_per_package ?? 1;
+
+                if ($sourceType === 'delivery') {
+                    // Verify delivery belongs to user
+                    $delivery = Delivery::where('id', $sourceId)
+                        ->where('livreur_id', $userId)
+                        ->whereIn('status', ['preparing', 'in_progress'])
+                        ->firstOrFail();
+
+                    $deliveryStock = DeliveryStock::where('delivery_id', $delivery->id)
+                        ->where('product_id', $productId)
+                        ->firstOrFail();
+
+                    $remaining = $deliveryStock->quantity_loaded - $deliveryStock->quantity_delivered - $deliveryStock->quantity_returned;
+
+                    if ($quantity > $remaining + 0.0001) {
+                        throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتبقي ({$formatQty($remaining, $ppp)})");
+                    }
+                    $quantity = min($quantity, $remaining);
+
+                    // Create delivery return
+                    DeliveryReturn::create([
+                        'delivery_id' => $delivery->id,
+                        'product_id' => $productId,
+                        'quantity' => $quantity,
+                        'reason' => 'excess',
+                        'returnable_to_stock' => true,
+                        'unit_cost' => $product->cost_price ?? 0,
+                        'loss_amount' => 0,
+                        'processed' => true,
+                        'processed_at' => now(),
+                    ]);
+
+                    $deliveryStock->recordReturn($quantity);
+
+                    // Return to target warehouse
+                    StockMovement::record(
+                        $productId,
+                        $targetWarehouse->id,
+                        $quantity,
+                        StockMovement::TYPE_DELIVERY_RETURN,
+                        $delivery->reference,
+                        $delivery,
+                        null,
+                        'إرجاع من السائق إلى المستودع'
+                    );
+
+                    $processed[] = ['product_id' => $productId, 'source' => 'delivery', 'quantity' => $quantity];
+
+                } elseif ($sourceType === 'van_session') {
+                    // Verify session belongs to user
+                    $session = VanSession::where('id', $sourceId)
+                        ->where('livreur_id', $userId)
+                        ->whereIn('status', ['preparing', 'active'])
+                        ->firstOrFail();
+
+                    $sessionItem = $session->items()->where('product_id', $productId)->firstOrFail();
+                    $available = $sessionItem->quantity_loaded - $sessionItem->quantity_sold - $sessionItem->quantity_returned;
+
+                    if ($quantity > $available + 0.0001) {
+                        throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتاح ({$formatQty($available, $ppp)})");
+                    }
+                    $quantity = min($quantity, $available);
+
+                    // Create van return
+                    VanReturn::create([
+                        'van_session_id' => $session->id,
+                        'product_id' => $productId,
+                        'quantity' => $quantity,
+                        'reason' => 'unsold',
+                        'returnable_to_stock' => true,
+                        'processed' => true,
+                        'processed_at' => now(),
+                    ]);
+
+                    $sessionItem->quantity_returned += $quantity;
+                    $sessionItem->save();
+
+                    // Return to target warehouse
+                    StockMovement::record(
+                        $productId,
+                        $targetWarehouse->id,
+                        $quantity,
+                        StockMovement::TYPE_VAN_RETURN,
+                        $session->reference,
+                        $session,
+                        null,
+                        'إرجاع من السائق إلى المستودع'
+                    );
+
+                    $processed[] = ['product_id' => $productId, 'source' => 'van_session', 'quantity' => $quantity];
+
+                } elseif ($sourceType === 'warehouse_stock') {
+                    // Verify user has a warehouse
+                    if (!$targetUser->warehouse_id) {
+                        throw new \Exception("المستخدم ليس لديه مستودع مخصص");
+                    }
+
+                    $stock = Stock::where('warehouse_id', $targetUser->warehouse_id)
+                        ->where('product_id', $productId)
+                        ->first();
+
+                    $currentQty = $stock ? (float) $stock->quantity : 0;
+
+                    if ($quantity > $currentQty + 0.0001) {
+                        throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتوفر ({$formatQty($currentQty, $ppp)})");
+                    }
+                    $quantity = min($quantity, $currentQty);
+
+                    // Deduct from user's warehouse
+                    StockMovement::record(
+                        $productId,
+                        $targetUser->warehouse_id,
+                        $quantity,
+                        StockMovement::TYPE_TRANSFER,
+                        'RETURN-' . $targetUser->id,
+                        $targetUser,
+                        null,
+                        'تحويل إرجاع من السائق'
+                    );
+
+                    // Add to target warehouse
+                    StockMovement::record(
+                        $productId,
+                        $targetWarehouse->id,
+                        $quantity,
+                        StockMovement::TYPE_TRANSFER_IN,
+                        'RETURN-' . $targetUser->id,
+                        $targetUser,
+                        null,
+                        'استلام إرجاع من السائق'
+                    );
+
+                    $processed[] = ['product_id' => $productId, 'source' => 'warehouse_stock', 'quantity' => $quantity];
+                }
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'تم إرجاع المنتجات بنجاح',
+                'processed' => $processed,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
     }
 
     /**

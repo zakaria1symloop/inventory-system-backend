@@ -122,6 +122,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Sales
     Route::apiResource('sales', SaleController::class);
+    Route::post('/sales/{sale}/confirm', [SaleController::class, 'confirm']);
     Route::post('/sales/{sale}/return', [SaleController::class, 'createReturn']);
     Route::get('/sales/{sale}/facture/pdf', [SaleController::class, 'generateFacturePdf']);
     Route::get('/sales/{sale}/facture/stream', [SaleController::class, 'streamFacturePdf']);
@@ -221,6 +222,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Stock Transfers (Cashvan)
     Route::apiResource('stock-transfers', StockTransferController::class)->except(['update']);
+    Route::post('/stock-transfers/{stockTransfer}/approve', [StockTransferController::class, 'approve']);
     Route::post('/stock-transfers/{stockTransfer}/collect', [StockTransferController::class, 'collect']);
     Route::get('/my-pending-transfers', [StockTransferController::class, 'myPendingTransfers']);
     Route::get('/my-stock', [StockTransferController::class, 'myStock']);
@@ -228,6 +230,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Livreur Stock (Merchandise in trucks)
     Route::get('/livreur-stock', [DeliveryController::class, 'livreurStock']);
+    Route::post('/livreur-stock/{userId}/return', [DeliveryController::class, 'returnStock']);
 
     // Debtors (Clients with outstanding payments)
     Route::get('/debtors', [DeliveryController::class, 'getDebtors']);

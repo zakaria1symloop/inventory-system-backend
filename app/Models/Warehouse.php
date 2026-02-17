@@ -48,6 +48,11 @@ class Warehouse extends Model
         return $this->hasMany(Adjustment::class);
     }
 
+    public function assignedUser()
+    {
+        return $this->hasOne(User::class, 'warehouse_id');
+    }
+
     public function scopeActive($query)
     {
         return $query->where('is_active', true);

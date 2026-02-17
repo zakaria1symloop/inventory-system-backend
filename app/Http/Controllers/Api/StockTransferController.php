@@ -18,7 +18,7 @@ class StockTransferController extends Controller
      */
     public function index(Request $request)
     {
-        $query = StockTransfer::with(['fromWarehouse', 'toWarehouse', 'creator', 'collector', 'items.product']);
+        $query = StockTransfer::with(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product']);
 
         if ($request->from_warehouse_id) {
             $query->where('from_warehouse_id', $request->from_warehouse_id);
@@ -46,7 +46,8 @@ class StockTransferController extends Controller
     }
 
     /**
-     * Create a new transfer (admin creates, status = pending)
+     * Create a new transfer request (status = pending)
+     * Can be created by admin or driver (driver requests products)
      */
     public function store(Request $request)
     {
@@ -62,33 +63,11 @@ class StockTransferController extends Controller
         DB::beginTransaction();
 
         try {
-            // Validate stock availability in source warehouse
-            $stockErrors = [];
-            foreach ($request->items as $item) {
-                $stock = Stock::where('product_id', $item['product_id'])
-                    ->where('warehouse_id', $request->from_warehouse_id)
-                    ->first();
-
-                $available = $stock ? $stock->quantity : 0;
-
-                if ($available < $item['quantity']) {
-                    $product = Product::find($item['product_id']);
-                    $stockErrors[] = ($product->name ?? 'غير معروف') . ": المطلوب {$item['quantity']}، المتوفر {$available}";
-                }
-            }
-
-            if (count($stockErrors) > 0) {
-                return response()->json([
-                    'message' => 'الكمية غير متوفرة في المخزن المصدر',
-                    'errors' => $stockErrors,
-                ], 400);
-            }
-
             $transfer = StockTransfer::create([
                 'from_warehouse_id' => $request->from_warehouse_id,
                 'to_warehouse_id' => $request->to_warehouse_id,
                 'created_by' => auth()->id(),
-                'status' => 'pending',
+                'status' => StockTransfer::STATUS_PENDING,
                 'notes' => $request->notes,
             ]);
 
@@ -103,7 +82,7 @@ class StockTransferController extends Controller
             DB::commit();
 
             return response()->json(
-                $transfer->load(['fromWarehouse', 'toWarehouse', 'creator', 'items.product']),
+                $transfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'items.product']),
                 201
             );
         } catch (\Exception $e) {
@@ -118,16 +97,62 @@ class StockTransferController extends Controller
     public function show(StockTransfer $stockTransfer)
     {
         return response()->json(
-            $stockTransfer->load(['fromWarehouse', 'toWarehouse', 'creator', 'collector', 'items.product'])
+            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
         );
     }
 
     /**
-     * Driver confirms collection - moves stock from source to destination warehouse
+     * Admin approves the request → status becomes "loading" (chargement)
+     * Validates stock availability in source warehouse
+     */
+    public function approve(StockTransfer $stockTransfer)
+    {
+        if (!$stockTransfer->isPending()) {
+            return response()->json(['message' => 'هذا التحويل تمت الموافقة عليه بالفعل'], 400);
+        }
+
+        // Validate stock availability in source warehouse
+        $stockErrors = [];
+        foreach ($stockTransfer->items as $item) {
+            $stock = Stock::where('product_id', $item->product_id)
+                ->where('warehouse_id', $stockTransfer->from_warehouse_id)
+                ->first();
+
+            $available = $stock ? $stock->quantity : 0;
+
+            if ($available < $item->quantity) {
+                $product = Product::find($item->product_id);
+                $stockErrors[] = ($product->name ?? 'غير معروف') . ": المطلوب {$item->quantity}، المتوفر {$available}";
+            }
+        }
+
+        if (count($stockErrors) > 0) {
+            return response()->json([
+                'message' => 'الكمية غير متوفرة في المخزن المصدر',
+                'errors' => $stockErrors,
+            ], 400);
+        }
+
+        $stockTransfer->status = StockTransfer::STATUS_LOADING;
+        $stockTransfer->approved_by = auth()->id();
+        $stockTransfer->approved_at = now();
+        $stockTransfer->save();
+
+        return response()->json(
+            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'approver', 'items.product'])
+        );
+    }
+
+    /**
+     * Collect/Start - moves stock from source to destination warehouse
+     * Status: loading → collected (driver can now sell)
      */
     public function collect(StockTransfer $stockTransfer)
     {
-        if (!$stockTransfer->isPending()) {
+        if (!$stockTransfer->isLoading()) {
+            if ($stockTransfer->isPending()) {
+                return response()->json(['message' => 'يجب الموافقة على التحويل أولاً قبل الاستلام'], 400);
+            }
             return response()->json(['message' => 'هذا التحويل تم استلامه بالفعل'], 400);
         }
 
@@ -183,7 +208,7 @@ class StockTransferController extends Controller
                 );
             }
 
-            $stockTransfer->status = 'collected';
+            $stockTransfer->status = StockTransfer::STATUS_COLLECTED;
             $stockTransfer->collected_by = auth()->id();
             $stockTransfer->collected_at = now();
             $stockTransfer->save();
@@ -191,7 +216,7 @@ class StockTransferController extends Controller
             DB::commit();
 
             return response()->json(
-                $stockTransfer->load(['fromWarehouse', 'toWarehouse', 'creator', 'collector', 'items.product'])
+                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
             );
         } catch (\Exception $e) {
             DB::rollBack();
@@ -200,11 +225,11 @@ class StockTransferController extends Controller
     }
 
     /**
-     * Cancel a pending transfer
+     * Cancel a pending or loading transfer
      */
     public function destroy(StockTransfer $stockTransfer)
     {
-        if (!$stockTransfer->isPending()) {
+        if ($stockTransfer->isCollected()) {
             return response()->json(['message' => 'لا يمكن حذف تحويل تم استلامه'], 400);
         }
 
@@ -214,7 +239,7 @@ class StockTransferController extends Controller
     }
 
     /**
-     * Get pending transfers for the current user's warehouse
+     * Get pending/loading transfers for the current user's warehouse
      */
     public function myPendingTransfers()
     {
@@ -224,9 +249,9 @@ class StockTransferController extends Controller
             return response()->json([]);
         }
 
-        $transfers = StockTransfer::with(['fromWarehouse', 'toWarehouse', 'creator', 'items.product'])
+        $transfers = StockTransfer::with(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'approver', 'items.product'])
             ->where('to_warehouse_id', $user->warehouse_id)
-            ->where('status', 'pending')
+            ->whereIn('status', [StockTransfer::STATUS_PENDING, StockTransfer::STATUS_LOADING])
             ->latest()
             ->get();
 

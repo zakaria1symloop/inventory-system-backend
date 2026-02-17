@@ -10,19 +10,27 @@ class StockTransfer extends Model
 {
     use HasFactory, SoftDeletes;
 
+    // Statuses: pending (order) → loading (chargement) → collected (start)
+    const STATUS_PENDING = 'pending';
+    const STATUS_LOADING = 'loading';
+    const STATUS_COLLECTED = 'collected';
+
     protected $fillable = [
         'reference',
         'from_warehouse_id',
         'to_warehouse_id',
         'created_by',
         'collected_by',
+        'approved_by',
         'status',
         'collected_at',
+        'approved_at',
         'notes',
     ];
 
     protected $casts = [
         'collected_at' => 'datetime',
+        'approved_at' => 'datetime',
     ];
 
     protected static function boot()
@@ -66,6 +74,11 @@ class StockTransfer extends Model
         return $this->belongsTo(User::class, 'collected_by');
     }
 
+    public function approver()
+    {
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
     public function items()
     {
         return $this->hasMany(StockTransferItem::class);
@@ -73,22 +86,32 @@ class StockTransfer extends Model
 
     public function isPending()
     {
-        return $this->status === 'pending';
+        return $this->status === self::STATUS_PENDING;
+    }
+
+    public function isLoading()
+    {
+        return $this->status === self::STATUS_LOADING;
     }
 
     public function isCollected()
     {
-        return $this->status === 'collected';
+        return $this->status === self::STATUS_COLLECTED;
     }
 
     public function scopePending($query)
     {
-        return $query->where('status', 'pending');
+        return $query->where('status', self::STATUS_PENDING);
+    }
+
+    public function scopeLoading($query)
+    {
+        return $query->where('status', self::STATUS_LOADING);
     }
 
     public function scopeCollected($query)
     {
-        return $query->where('status', 'collected');
+        return $query->where('status', self::STATUS_COLLECTED);
     }
 
     public function scopeForWarehouse($query, $warehouseId)

@@ -229,7 +229,7 @@ class VanSessionController extends Controller
         try {
             // Process returns for unsold items
             foreach ($vanSession->items as $sessionItem) {
-                $unsold = $sessionItem->quantity_loaded - $sessionItem->quantity_sold;
+                $unsold = $sessionItem->quantity_loaded - $sessionItem->quantity_sold - $sessionItem->quantity_returned;
 
                 if ($unsold > 0) {
                     // Create return record

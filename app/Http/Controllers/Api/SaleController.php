@@ -9,6 +9,7 @@ use App\Models\SaleReturn;
 use App\Models\SaleReturnItem;
 use App\Models\Stock;
 use App\Models\StockMovement;
+use App\Models\Caisse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -17,7 +18,7 @@ class SaleController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Sale::with(['client', 'warehouse', 'user']);
+        $query = Sale::with(['client', 'warehouse', 'user', 'items.product:id,pieces_per_package']);
 
         if ($request->client_id) {
             $query->where('client_id', $request->client_id);
@@ -67,6 +68,7 @@ class SaleController extends Controller
             'shipping' => 'nullable|numeric|min:0',
             'note' => 'nullable|string',
             'paid_amount' => 'nullable|numeric|min:0',
+            'status' => 'nullable|in:completed,draft',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity' => 'required|numeric|min:0.01',
@@ -75,25 +77,28 @@ class SaleController extends Controller
             'items.*.tax' => 'nullable|numeric|min:0',
         ]);
 
+        $isDraft = ($request->status ?? 'completed') === 'draft';
+
         DB::beginTransaction();
 
         try {
-            // Validate stock availability for all items first (considering reserved quantities from orders)
-            foreach ($request->items as $item) {
-                $product = \App\Models\Product::find($item['product_id']);
-                $productName = $product ? $product->name : 'غير معروف';
+            // Validate stock availability only for non-draft sales
+            if (!$isDraft) {
+                foreach ($request->items as $item) {
+                    $product = \App\Models\Product::find($item['product_id']);
+                    $productName = $product ? $product->name : 'غير معروف';
 
-                // Use getAvailableStock to check stock minus reserved quantities
-                $availableQty = Stock::getAvailableStock($item['product_id'], $request->warehouse_id);
+                    $availableQty = Stock::getAvailableStock($item['product_id'], $request->warehouse_id);
 
-                if ($availableQty < $item['quantity']) {
-                    throw new \Exception("الكمية غير متوفرة للمنتج: {$productName}. المتوفر: {$availableQty}، المطلوب: {$item['quantity']}");
+                    if ($availableQty < $item['quantity']) {
+                        throw new \Exception("الكمية غير متوفرة للمنتج: {$productName}. المتوفر: {$availableQty}، المطلوب: {$item['quantity']}");
+                    }
                 }
             }
 
             // Auto-detect source based on user role
             $role = auth()->user()->role;
-            $source = in_array($role, ['seller', 'livreur']) ? 'app' : 'web';
+            $source = in_array($role, ['seller', 'livreur', 'cashvan']) ? 'app' : 'web';
 
             $sale = Sale::create([
                 'client_id' => $request->client_id,
@@ -104,55 +109,219 @@ class SaleController extends Controller
                 'tax' => $request->tax ?? 0,
                 'shipping' => $request->shipping ?? 0,
                 'note' => $request->note,
-                'status' => 'completed',
+                'status' => $isDraft ? 'draft' : 'completed',
                 'source' => $source,
             ]);
 
             foreach ($request->items as $item) {
+                $product = \App\Models\Product::find($item['product_id']);
                 SaleItem::create([
                     'sale_id' => $sale->id,
                     'product_id' => $item['product_id'],
                     'quantity' => $item['quantity'],
                     'unit_price' => $item['unit_price'],
+                    'cost_price' => $product->cost_price ?? 0,
                     'discount' => $item['discount'] ?? 0,
                     'tax' => $item['tax'] ?? 0,
                 ]);
 
-                // Record stock movement
-                StockMovement::record(
-                    $item['product_id'],
-                    $request->warehouse_id,
-                    $item['quantity'],
-                    StockMovement::TYPE_SALE,
-                    $sale->reference,
-                    $sale,
-                    $item['unit_price']
-                );
+                // Only deduct stock for non-draft sales
+                if (!$isDraft) {
+                    StockMovement::record(
+                        $item['product_id'],
+                        $request->warehouse_id,
+                        $item['quantity'],
+                        StockMovement::TYPE_SALE,
+                        $sale->reference,
+                        $sale,
+                        $item['unit_price']
+                    );
+                }
             }
 
             $sale->calculateTotals();
 
-            // Handle payment if provided
-            $paidAmount = $request->paid_amount ?? 0;
+            // Only handle payments for non-draft sales
+            if (!$isDraft) {
+                $paidAmount = $request->paid_amount ?? 0;
 
-            if ($request->client_id) {
+                if ($request->client_id) {
+                    $client = $sale->client;
+
+                    // Add the sale amount to client balance (debt)
+                    $client->updateBalance($sale->grand_total, 'add');
+
+                    if ($paidAmount > 0) {
+                        $appliedToSale = min($paidAmount, $sale->grand_total);
+                        $appliedToPreviousDebt = max(0, $paidAmount - $sale->grand_total);
+
+                        if ($appliedToSale > 0) {
+                            $sale->payments()->create([
+                                'reference' => 'PAY-' . strtoupper(uniqid()),
+                                'amount' => $appliedToSale,
+                                'payment_method' => 'cash',
+                                'date' => $request->date,
+                                'notes' => 'دفعة عند البيع',
+                                'user_id' => auth()->id(),
+                            ]);
+
+                            $sale->paid_amount = $appliedToSale;
+                            $sale->due_amount = $sale->grand_total - $appliedToSale;
+
+                            if ($sale->due_amount <= 0) {
+                                $sale->payment_status = 'paid';
+                                $sale->due_amount = 0;
+                            } else {
+                                $sale->payment_status = 'partial';
+                            }
+
+                            $sale->save();
+
+                            $client->updateBalance($appliedToSale, 'subtract');
+                        }
+
+                        if ($appliedToPreviousDebt > 0) {
+                            $remainingExtra = $appliedToPreviousDebt;
+
+                            $unpaidSales = Sale::where('client_id', $client->id)
+                                ->where('id', '!=', $sale->id)
+                                ->where('due_amount', '>', 0)
+                                ->orderBy('date', 'asc')
+                                ->orderBy('id', 'asc')
+                                ->get();
+
+                            foreach ($unpaidSales as $oldSale) {
+                                if ($remainingExtra <= 0) break;
+
+                                $applyToThis = min($remainingExtra, $oldSale->due_amount);
+
+                                $oldSale->payments()->create([
+                                    'reference' => 'PAY-' . strtoupper(uniqid()),
+                                    'amount' => $applyToThis,
+                                    'payment_method' => 'cash',
+                                    'date' => $request->date,
+                                    'notes' => 'تسديد من فاتورة ' . $sale->reference,
+                                    'user_id' => auth()->id(),
+                                ]);
+
+                                $oldSale->paid_amount += $applyToThis;
+                                $oldSale->due_amount -= $applyToThis;
+
+                                if ($oldSale->due_amount <= 0) {
+                                    $oldSale->payment_status = 'paid';
+                                    $oldSale->due_amount = 0;
+                                } else {
+                                    $oldSale->payment_status = 'partial';
+                                }
+
+                                $oldSale->save();
+
+                                $client->updateBalance($applyToThis, 'subtract');
+
+                                $remainingExtra -= $applyToThis;
+                            }
+
+                            if ($remainingExtra > 0) {
+                                $client->updateBalance($remainingExtra, 'subtract');
+                            }
+                        }
+                    }
+                } else {
+                    if ($paidAmount > 0 && $paidAmount <= $sale->grand_total) {
+                        $sale->paid_amount = $paidAmount;
+                        $sale->due_amount = $sale->grand_total - $paidAmount;
+
+                        if ($sale->due_amount <= 0) {
+                            $sale->payment_status = 'paid';
+                            $sale->due_amount = 0;
+                        } else {
+                            $sale->payment_status = 'partial';
+                        }
+
+                        $sale->save();
+                    }
+                }
+            }
+
+            // Record caisse transaction for paid amount
+            if (!$isDraft && $paidAmount > 0) {
+                $caisse = Caisse::where('user_id', auth()->id())->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'in',
+                        $paidAmount,
+                        Sale::class,
+                        $sale->id,
+                        'تحصيل من فاتورة ' . $sale->reference,
+                        auth()->id()
+                    );
+                }
+            }
+
+            DB::commit();
+
+            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']), 201);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error('Sale creation failed: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
+            return response()->json(['message' => $e->getMessage(), 'file' => $e->getFile(), 'line' => $e->getLine()], 500);
+        }
+    }
+
+    /**
+     * Confirm a draft sale - deduct stock, process payments, change status to completed
+     */
+    public function confirm(Sale $sale, Request $request)
+    {
+        if ($sale->status !== 'draft') {
+            return response()->json(['message' => 'يمكن تأكيد المسودات فقط'], 400);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            // Validate stock availability
+            foreach ($sale->items()->with('product')->get() as $item) {
+                $productName = $item->product ? $item->product->name : 'غير معروف';
+                $availableQty = Stock::getAvailableStock($item->product_id, $sale->warehouse_id);
+
+                if ($availableQty < $item->quantity) {
+                    throw new \Exception("الكمية غير متوفرة للمنتج: {$productName}. المتوفر: {$availableQty}، المطلوب: {$item->quantity}");
+                }
+            }
+
+            // Deduct stock for each item
+            foreach ($sale->items()->with('product')->get() as $item) {
+                StockMovement::record(
+                    $item->product_id,
+                    $sale->warehouse_id,
+                    $item->quantity,
+                    StockMovement::TYPE_SALE,
+                    $sale->reference,
+                    $sale,
+                    $item->unit_price
+                );
+            }
+
+            $sale->status = 'completed';
+            $sale->save();
+
+            // Handle payment
+            $paidAmount = $request->paid_amount ?? $sale->paid_amount ?? 0;
+
+            if ($sale->client_id) {
                 $client = $sale->client;
-
-                // Add the sale amount to client balance (debt)
                 $client->updateBalance($sale->grand_total, 'add');
 
                 if ($paidAmount > 0) {
-                    // Calculate how much goes to this sale vs previous debt
                     $appliedToSale = min($paidAmount, $sale->grand_total);
-                    $appliedToPreviousDebt = max(0, $paidAmount - $sale->grand_total);
 
-                    // Create payment for this sale
                     if ($appliedToSale > 0) {
                         $sale->payments()->create([
                             'reference' => 'PAY-' . strtoupper(uniqid()),
                             'amount' => $appliedToSale,
                             'payment_method' => 'cash',
-                            'date' => $request->date,
+                            'date' => $sale->date,
                             'notes' => 'دفعة عند البيع',
                             'user_id' => auth()->id(),
                         ]);
@@ -168,65 +337,10 @@ class SaleController extends Controller
                         }
 
                         $sale->save();
-
-                        // Reduce client balance by amount paid
                         $client->updateBalance($appliedToSale, 'subtract');
-                    }
-
-                    // Apply extra to previous unpaid sales (FIFO - oldest first)
-                    if ($appliedToPreviousDebt > 0) {
-                        $remainingExtra = $appliedToPreviousDebt;
-
-                        // Get unpaid sales for this client (oldest first)
-                        $unpaidSales = Sale::where('client_id', $client->id)
-                            ->where('id', '!=', $sale->id)
-                            ->where('due_amount', '>', 0)
-                            ->orderBy('date', 'asc')
-                            ->orderBy('id', 'asc')
-                            ->get();
-
-                        foreach ($unpaidSales as $oldSale) {
-                            if ($remainingExtra <= 0) break;
-
-                            $applyToThis = min($remainingExtra, $oldSale->due_amount);
-
-                            // Create payment for this old sale
-                            $oldSale->payments()->create([
-                                'reference' => 'PAY-' . strtoupper(uniqid()),
-                                'amount' => $applyToThis,
-                                'payment_method' => 'cash',
-                                'date' => $request->date,
-                                'notes' => 'تسديد من فاتورة ' . $sale->reference,
-                                'user_id' => auth()->id(),
-                            ]);
-
-                            // Update old sale
-                            $oldSale->paid_amount += $applyToThis;
-                            $oldSale->due_amount -= $applyToThis;
-
-                            if ($oldSale->due_amount <= 0) {
-                                $oldSale->payment_status = 'paid';
-                                $oldSale->due_amount = 0;
-                            } else {
-                                $oldSale->payment_status = 'partial';
-                            }
-
-                            $oldSale->save();
-
-                            // Reduce client balance
-                            $client->updateBalance($applyToThis, 'subtract');
-
-                            $remainingExtra -= $applyToThis;
-                        }
-
-                        // If there's still remaining (overpayment beyond all debt), just reduce balance
-                        if ($remainingExtra > 0) {
-                            $client->updateBalance($remainingExtra, 'subtract');
-                        }
                     }
                 }
             } else {
-                // No client (cash sale) - handle payment for the sale only
                 if ($paidAmount > 0 && $paidAmount <= $sale->grand_total) {
                     $sale->paid_amount = $paidAmount;
                     $sale->due_amount = $sale->grand_total - $paidAmount;
@@ -244,11 +358,10 @@ class SaleController extends Controller
 
             DB::commit();
 
-            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']), 201);
+            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
         } catch (\Exception $e) {
             DB::rollBack();
-            \Log::error('Sale creation failed: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
-            return response()->json(['message' => $e->getMessage(), 'file' => $e->getFile(), 'line' => $e->getLine()], 500);
+            return response()->json(['message' => $e->getMessage()], 500);
         }
     }
 
@@ -259,6 +372,51 @@ class SaleController extends Controller
 
     public function update(Request $request, Sale $sale)
     {
+        // Draft sales can be fully edited (items, client, warehouse, etc.)
+        if ($sale->status === 'draft') {
+            $request->validate([
+                'client_id' => 'nullable|exists:clients,id',
+                'warehouse_id' => 'nullable|exists:warehouses,id',
+                'date' => 'nullable|date',
+                'discount' => 'nullable|numeric|min:0',
+                'tax' => 'nullable|numeric|min:0',
+                'shipping' => 'nullable|numeric|min:0',
+                'note' => 'nullable|string',
+                'paid_amount' => 'nullable|numeric|min:0',
+                'items' => 'nullable|array|min:1',
+                'items.*.product_id' => 'required|exists:products,id',
+                'items.*.quantity' => 'required|numeric|min:0.01',
+                'items.*.unit_price' => 'required|numeric|min:0',
+                'items.*.discount' => 'nullable|numeric|min:0',
+                'items.*.tax' => 'nullable|numeric|min:0',
+            ]);
+
+            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'note', 'paid_amount']));
+
+            // If items are provided, replace them
+            if ($request->has('items')) {
+                $sale->items()->forceDelete();
+
+                foreach ($request->items as $item) {
+                    $product = \App\Models\Product::find($item['product_id']);
+                    SaleItem::create([
+                        'sale_id' => $sale->id,
+                        'product_id' => $item['product_id'],
+                        'quantity' => $item['quantity'],
+                        'unit_price' => $item['unit_price'],
+                        'cost_price' => $product->cost_price ?? 0,
+                        'discount' => $item['discount'] ?? 0,
+                        'tax' => $item['tax'] ?? 0,
+                    ]);
+                }
+            }
+
+            $sale->calculateTotals();
+
+            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
+        }
+
+        // Non-draft sales: only allow limited fields
         $request->validate([
             'discount' => 'nullable|numeric|min:0',
             'tax' => 'nullable|numeric|min:0',
@@ -274,6 +432,13 @@ class SaleController extends Controller
 
     public function destroy(Sale $sale)
     {
+        // Draft sales can be deleted freely (no stock was deducted)
+        if ($sale->status === 'draft') {
+            $sale->items()->forceDelete();
+            $sale->forceDelete();
+            return response()->json(['message' => 'تم حذف المسودة بنجاح']);
+        }
+
         // Security checks for traceability
         if ($sale->payment_status === 'paid') {
             return response()->json([

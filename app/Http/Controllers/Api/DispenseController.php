@@ -29,6 +29,10 @@ class DispenseController extends Controller
             $query->where('employee_id', $request->employee_id);
         }
 
+        if ($request->has('user_id') && $request->user_id) {
+            $query->where('user_id', $request->user_id);
+        }
+
         if ($request->has('date_from') && $request->date_from) {
             $query->whereDate('date', '>=', $request->date_from);
         }
@@ -40,7 +44,15 @@ class DispenseController extends Controller
         $query->orderBy('date', 'desc')->orderBy('created_at', 'desc');
 
         $perPage = $request->get('per_page', 15);
-        return response()->json($query->paginate($perPage));
+
+        // Include filtered total
+        $filteredTotal = (clone $query)->sum('amount');
+
+        $result = $query->paginate($perPage);
+        $response = $result->toArray();
+        $response['filtered_total'] = $filteredTotal;
+
+        return response()->json($response);
     }
 
     public function store(Request $request)
@@ -52,22 +64,28 @@ class DispenseController extends Controller
             'amount' => 'required|numeric|min:0.01',
             'description' => 'nullable|string|max:255',
             'notes' => 'nullable|string',
+            'caisse_id' => 'nullable|exists:caisses,id',
         ]);
 
         $validated['user_id'] = auth()->id();
+        $caisseId = $request->caisse_id;
+        unset($validated['caisse_id']);
 
         $dispense = Dispense::create($validated);
         $dispense->load(['employee:id,name', 'user:id,name']);
 
-        // Record caisse transaction
-        $caisse = Caisse::where('user_id', auth()->id())->first();
+        // Record caisse transaction - use specified caisse or fallback to auth user's caisse
+        $caisse = $caisseId
+            ? Caisse::find($caisseId)
+            : Caisse::where('user_id', auth()->id())->first();
+
         if ($caisse) {
             $caisse->addTransaction(
                 'out',
                 $validated['amount'],
                 'dispense',
                 $dispense->id,
-                "Dépense: {$dispense->description}",
+                "مصروف: {$dispense->description}",
                 auth()->id()
             );
         }

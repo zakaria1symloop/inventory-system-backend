@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client;
+use App\Models\ClientCategory;
 use App\Models\DeliveryOrder;
 use App\Models\Setting;
 use Illuminate\Http\Request;
@@ -104,6 +105,14 @@ class ClientController extends Controller
 
         $data = $request->all();
         $data['created_by'] = auth()->id();
+
+        // Auto-assign default client category if none provided
+        if (empty($data['client_category_id'])) {
+            $defaultCategory = ClientCategory::where('is_default', true)->first();
+            if ($defaultCategory) {
+                $data['client_category_id'] = $defaultCategory->id;
+            }
+        }
 
         // Auto-detect source based on user role
         $role = auth()->user()->role;
