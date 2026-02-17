@@ -979,8 +979,11 @@ class DeliveryController extends Controller
     {
         $debtors = collect();
 
+        $warehouseId = $request->query('warehouse_id');
+        $sellerId = $request->query('seller_id');
+
         // 1. Get clients with unpaid SALES (direct sales invoices)
-        $salesDebtors = \App\Models\Sale::select(
+        $salesQuery = \App\Models\Sale::select(
                 'client_id',
                 DB::raw('SUM(grand_total) as sales_total_due'),
                 DB::raw('SUM(paid_amount) as sales_total_paid'),
@@ -989,9 +992,16 @@ class DeliveryController extends Controller
             )
             ->whereNotNull('client_id')
             ->where('status', 'completed')
-            ->where('due_amount', '>', 0)
-            ->groupBy('client_id')
-            ->get();
+            ->where('due_amount', '>', 0);
+
+        if ($warehouseId) {
+            $salesQuery->where('warehouse_id', $warehouseId);
+        }
+        if ($sellerId) {
+            $salesQuery->where('user_id', $sellerId);
+        }
+
+        $salesDebtors = $salesQuery->groupBy('client_id')->get();
 
         // 2. Get clients with unpaid DELIVERIES
         $deliveryDebtors = DeliveryOrder::select(

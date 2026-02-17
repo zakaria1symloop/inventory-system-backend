@@ -439,38 +439,18 @@ class SaleController extends Controller
             return response()->json(['message' => 'تم حذف المسودة بنجاح']);
         }
 
-        // Security checks for traceability
-        if ($sale->payment_status === 'paid') {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة مدفوعة. استخدم المرتجعات للحفاظ على التتبع المحاسبي'
-            ], 400);
-        }
-
-        if ($sale->payment_status === 'partial') {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها دفعات. استخدم المرتجعات للحفاظ على التتبع المحاسبي'
-            ], 400);
-        }
-
-        // Check if has any payments
-        if ($sale->payments()->exists()) {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها دفعات مسجلة. استخدم المرتجعات بدلاً من ذلك'
-            ], 400);
-        }
-
         // Check if has any returns
         if ($sale->returns()->exists()) {
             return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها مرتجعات. هذه الفاتورة مرتبطة بعمليات أخرى'
+                'message' => 'لا يمكن إلغاء فاتورة بها مرتجعات. هذه الفاتورة مرتبطة بعمليات أخرى'
             ], 400);
         }
 
         DB::beginTransaction();
 
         try {
+            // 1. Reverse stock movements (return items to warehouse)
             foreach ($sale->items as $item) {
-                // Record stock movement for cancellation
                 StockMovement::record(
                     $item->product_id,
                     $sale->warehouse_id,
@@ -479,22 +459,45 @@ class SaleController extends Controller
                     $sale->reference . '-CANCEL',
                     $sale,
                     $item->unit_price,
-                    'إلغاء مبيعات'
+                    'إلغاء فاتورة'
                 );
             }
 
+            // 2. Reverse client balance (subtract the sale amount that was added as debt)
             if ($sale->client_id) {
-                $sale->client->updateBalance($sale->grand_total, 'subtract');
+                $client = $sale->client;
+                // Remove the sale debt from client
+                $client->updateBalance($sale->grand_total, 'subtract');
+                // Add back the paid amount (was subtracted from debt when paid)
+                if ($sale->paid_amount > 0) {
+                    $client->updateBalance($sale->paid_amount, 'add');
+                }
             }
 
+            // 3. Reverse caisse transactions
+            $caisse = Caisse::where('user_id', $sale->user_id)->where('is_active', true)->first();
+            if ($caisse && $sale->paid_amount > 0) {
+                $caisse->addTransaction(
+                    'out',
+                    $sale->paid_amount,
+                    Sale::class,
+                    $sale->id,
+                    'إلغاء فاتورة ' . $sale->reference,
+                    auth()->id()
+                );
+            }
+
+            // 4. Mark as cancelled and soft delete (keeps the record)
+            $sale->status = 'cancelled';
+            $sale->save();
             $sale->delete();
 
             DB::commit();
 
-            return response()->json(['message' => 'تم حذف المبيعات بنجاح']);
+            return response()->json(['message' => 'تم إلغاء الفاتورة وإرجاع المخزون بنجاح']);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['message' => 'حدث خطأ أثناء الحذف'], 500);
+            return response()->json(['message' => 'حدث خطأ أثناء الإلغاء: ' . $e->getMessage()], 500);
         }
     }
 

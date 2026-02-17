@@ -48,7 +48,9 @@ class StockTransfer extends Model
     {
         $prefix = 'TRF';
         $date = now()->format('Ymd');
-        $last = self::whereDate('created_at', today())->latest()->first();
+        $last = self::where('reference', 'like', $prefix . $date . '%')
+            ->orderByRaw('CAST(SUBSTRING(reference, -4) AS UNSIGNED) DESC')
+            ->first();
         $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
 
         return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);

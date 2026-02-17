@@ -219,6 +219,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/product-requests/{productRequest}/approve', [ProductRequestController::class, 'approve']);
     Route::post('/product-requests/{productRequest}/reject', [ProductRequestController::class, 'reject']);
     Route::post('/product-requests/{productRequest}/fulfill', [ProductRequestController::class, 'fulfill']);
+    Route::put('/product-requests/{productRequest}', [ProductRequestController::class, 'update']);
+    Route::delete('/product-requests/{productRequest}', [ProductRequestController::class, 'destroy']);
 
     // Stock Transfers (Cashvan)
     Route::apiResource('stock-transfers', StockTransferController::class)->except(['update']);
@@ -314,6 +316,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/caisses/{id}/transactions', [CaisseController::class, 'transactions']);
     Route::post('/caisses/{id}/settle', [CaisseController::class, 'settle']);
     Route::get('/caisses', [CaisseController::class, 'index']);
+    Route::post('/caisses', [CaisseController::class, 'store']);
     Route::get('/caisses/{id}', [CaisseController::class, 'show']);
 
     // Dispenses (Expenses)

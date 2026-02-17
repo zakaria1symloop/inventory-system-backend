@@ -62,6 +62,7 @@ class PurchaseController extends Controller
             'tax' => 'nullable|numeric|min:0',
             'shipping' => 'nullable|numeric|min:0',
             'note' => 'nullable|string',
+            'status' => 'nullable|in:pending,received',
             'paid_amount' => 'nullable|numeric|min:0',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
@@ -84,7 +85,7 @@ class PurchaseController extends Controller
                 'tax' => $request->tax ?? 0,
                 'shipping' => $request->shipping ?? 0,
                 'note' => $request->note,
-                'status' => 'received',
+                'status' => $request->status ?? 'received',
             ]);
 
             foreach ($request->items as $item) {
@@ -97,31 +98,40 @@ class PurchaseController extends Controller
                     'tax' => $item['tax'] ?? 0,
                 ]);
 
-                // Update product selling price if provided
-                if (isset($item['selling_price']) && $item['selling_price'] > 0) {
-                    $product = \App\Models\Product::find($item['product_id']);
-                    if ($product) {
-                        $product->unit_price = $item['selling_price'];
-                        $product->save();
+                // Only process stock and prices for received purchases (not drafts)
+                if (($request->status ?? 'received') === 'received') {
+                    // Update product selling price if provided
+                    if (isset($item['selling_price']) && $item['selling_price'] > 0) {
+                        $product = \App\Models\Product::find($item['product_id']);
+                        if ($product) {
+                            $product->unit_price = $item['selling_price'];
+                            $product->save();
+                        }
                     }
-                }
 
-                // Record stock movement
-                StockMovement::record(
-                    $item['product_id'],
-                    $request->warehouse_id,
-                    $item['quantity'],
-                    StockMovement::TYPE_PURCHASE,
-                    $purchase->reference,
-                    $purchase,
-                    $item['unit_price']
-                );
+                    // Record stock movement
+                    StockMovement::record(
+                        $item['product_id'],
+                        $request->warehouse_id,
+                        $item['quantity'],
+                        StockMovement::TYPE_PURCHASE,
+                        $purchase->reference,
+                        $purchase,
+                        $item['unit_price']
+                    );
+                }
             }
 
             $purchase->calculateTotals();
 
-            // Handle payment if provided
+            // Handle payment if provided (skip for drafts)
             $paidAmount = $request->paid_amount ?? 0;
+
+            if (($request->status ?? 'received') === 'pending') {
+                // Draft - no payment or supplier balance processing
+                DB::commit();
+                return response()->json($purchase->load(['supplier', 'warehouse', 'user', 'items.product']), 201);
+            }
 
             if ($request->supplier_id) {
                 $supplier = $purchase->supplier;

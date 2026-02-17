@@ -9,6 +9,8 @@ use App\Models\VanSession;
 use App\Models\VanSessionItem;
 use App\Models\Product;
 use App\Models\Stock;
+use App\Models\StockTransfer;
+use App\Models\StockTransferItem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -40,20 +42,28 @@ class ProductRequestController extends Controller
     public function myRequests(Request $request)
     {
         $user = $request->user();
+
+        // Check for active van session first
         $session = VanSession::where('livreur_id', $user->id)
             ->whereIn('status', ['preparing', 'active'])
             ->latest()
             ->first();
 
-        if (!$session) {
-            return response()->json([]);
+        if ($session) {
+            // Van session flow: return session requests
+            $requests = ProductRequest::with(['items.product', 'processor', 'warehouse'])
+                ->where('van_session_id', $session->id)
+                ->where('requested_by', $user->id)
+                ->latest()
+                ->get();
+        } else {
+            // Cashvan flow: return requests where van_session_id is null
+            $requests = ProductRequest::with(['items.product', 'processor', 'warehouse'])
+                ->where('requested_by', $user->id)
+                ->whereNull('van_session_id')
+                ->latest()
+                ->get();
         }
-
-        $requests = ProductRequest::with(['items.product', 'processor'])
-            ->where('van_session_id', $session->id)
-            ->where('requested_by', $user->id)
-            ->latest()
-            ->get();
 
         return response()->json($requests);
     }
@@ -64,7 +74,8 @@ class ProductRequestController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'van_session_id' => 'required|exists:van_sessions,id',
+            'van_session_id' => 'nullable|exists:van_sessions,id',
+            'warehouse_id' => 'required_without:van_session_id|exists:warehouses,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity' => 'required|numeric|min:0.01',
@@ -72,23 +83,29 @@ class ProductRequestController extends Controller
             'notes' => 'nullable|string',
         ]);
 
-        $session = VanSession::findOrFail($request->van_session_id);
+        if ($request->van_session_id) {
+            // Van session flow
+            $session = VanSession::findOrFail($request->van_session_id);
 
-        // Must be the session's driver
-        if ($session->livreur_id !== $request->user()->id) {
-            return response()->json(['message' => 'غير مصرح لك بطلب منتجات لهذه الجلسة'], 403);
+            if ($session->livreur_id !== $request->user()->id) {
+                return response()->json(['message' => 'غير مصرح لك بطلب منتجات لهذه الجلسة'], 403);
+            }
+
+            if ($session->status !== 'active') {
+                return response()->json(['message' => 'الجلسة غير نشطة'], 422);
+            }
+
+            $warehouseId = $session->warehouse_id;
+        } else {
+            // Cashvan flow - warehouse_id from request body
+            $warehouseId = $request->warehouse_id;
         }
 
-        // Session must be active
-        if ($session->status !== 'active') {
-            return response()->json(['message' => 'الجلسة غير نشطة'], 422);
-        }
-
-        $productRequest = DB::transaction(function () use ($request, $session) {
+        $productRequest = DB::transaction(function () use ($request, $warehouseId) {
             $pr = ProductRequest::create([
-                'van_session_id' => $session->id,
+                'van_session_id' => $request->van_session_id,
                 'requested_by' => $request->user()->id,
-                'warehouse_id' => $session->warehouse_id,
+                'warehouse_id' => $warehouseId,
                 'notes' => $request->notes,
             ]);
 
@@ -105,7 +122,7 @@ class ProductRequestController extends Controller
         });
 
         return response()->json(
-            $productRequest->load(['items.product', 'requester', 'vanSession']),
+            $productRequest->load(['items.product', 'requester', 'warehouse']),
             201
         );
     }
@@ -136,12 +153,15 @@ class ProductRequestController extends Controller
             'admin_notes' => 'nullable|string',
         ]);
 
-        $session = $productRequest->vanSession;
-        if ($session->status !== 'active') {
-            return response()->json(['message' => 'الجلسة غير نشطة'], 422);
+        // For van session requests, check session is active
+        if ($productRequest->van_session_id) {
+            $session = $productRequest->vanSession;
+            if ($session->status !== 'active') {
+                return response()->json(['message' => 'الجلسة غير نشطة'], 422);
+            }
         }
 
-        DB::transaction(function () use ($request, $productRequest, $session) {
+        $result = DB::transaction(function () use ($request, $productRequest) {
             // Update approved quantities
             if ($request->has('items')) {
                 foreach ($request->items as $itemData) {
@@ -161,11 +181,50 @@ class ProductRequestController extends Controller
                 'processed_by' => $request->user()->id,
                 'processed_at' => now(),
             ]);
+
+            // For cashvan requests (no van_session_id), auto-create stock transfer
+            if (!$productRequest->van_session_id) {
+                $requester = $productRequest->requester;
+                $productRequest->refresh();
+                $productRequest->load('items');
+
+                $transfer = StockTransfer::create([
+                    'from_warehouse_id' => $productRequest->warehouse_id,
+                    'to_warehouse_id' => $requester->warehouse_id,
+                    'created_by' => $productRequest->requested_by,
+                    'approved_by' => $request->user()->id,
+                    'approved_at' => now(),
+                    'status' => 'loading',
+                    'notes' => 'طلب منتجات #' . $productRequest->reference,
+                ]);
+
+                foreach ($productRequest->items as $item) {
+                    if ($item->quantity_approved > 0) {
+                        StockTransferItem::create([
+                            'stock_transfer_id' => $transfer->id,
+                            'product_id' => $item->product_id,
+                            'quantity' => $item->quantity_approved,
+                        ]);
+                    }
+                }
+
+                // Mark request as fulfilled (skip separate fulfill step for cashvan)
+                $productRequest->update(['status' => 'fulfilled']);
+
+                return ['transfer' => $transfer];
+            }
+
+            return [];
         });
 
-        return response()->json(
-            $productRequest->fresh()->load(['items.product', 'requester', 'processor'])
-        );
+        $fresh = $productRequest->fresh()->load(['items.product', 'requester', 'processor']);
+        $response = $fresh->toArray();
+
+        if (isset($result['transfer'])) {
+            $response['stock_transfer'] = $result['transfer']->load(['items.product', 'fromWarehouse', 'toWarehouse'])->toArray();
+        }
+
+        return response()->json($response);
     }
 
     /**
@@ -199,6 +258,10 @@ class ProductRequestController extends Controller
         }
 
         $session = $productRequest->vanSession;
+        if (!$session) {
+            return response()->json(['message' => 'هذا الطلب لا يحتوي على جلسة بيع'], 422);
+        }
+
         if ($session->status !== 'active') {
             return response()->json(['message' => 'الجلسة غير نشطة'], 422);
         }
@@ -261,6 +324,71 @@ class ProductRequestController extends Controller
         return response()->json(
             $productRequest->fresh()->load(['items.product', 'requester', 'processor'])
         );
+    }
+
+    /**
+     * Update a pending product request
+     */
+    public function update(Request $request, ProductRequest $productRequest)
+    {
+        if ($productRequest->status !== 'pending') {
+            return response()->json(['message' => 'لا يمكن تعديل طلب غير معلق'], 422);
+        }
+
+        $request->validate([
+            'warehouse_id' => 'sometimes|exists:warehouses,id',
+            'notes' => 'nullable|string',
+            'items' => 'sometimes|array|min:1',
+            'items.*.product_id' => 'required_with:items|exists:products,id',
+            'items.*.quantity' => 'required_with:items|numeric|min:0.01',
+            'items.*.notes' => 'nullable|string',
+        ]);
+
+        DB::transaction(function () use ($request, $productRequest) {
+            // Update basic fields
+            $updateData = [];
+            if ($request->has('warehouse_id')) {
+                $updateData['warehouse_id'] = $request->warehouse_id;
+            }
+            if ($request->has('notes')) {
+                $updateData['notes'] = $request->notes;
+            }
+            if (!empty($updateData)) {
+                $productRequest->update($updateData);
+            }
+
+            // Update items if provided
+            if ($request->has('items')) {
+                $productRequest->items()->delete();
+                foreach ($request->items as $item) {
+                    ProductRequestItem::create([
+                        'product_request_id' => $productRequest->id,
+                        'product_id' => $item['product_id'],
+                        'quantity_requested' => $item['quantity'],
+                        'notes' => $item['notes'] ?? null,
+                    ]);
+                }
+            }
+        });
+
+        return response()->json(
+            $productRequest->fresh()->load(['items.product', 'requester', 'warehouse'])
+        );
+    }
+
+    /**
+     * Delete a pending product request
+     */
+    public function destroy(ProductRequest $productRequest)
+    {
+        if ($productRequest->status !== 'pending') {
+            return response()->json(['message' => 'لا يمكن حذف طلب غير معلق'], 422);
+        }
+
+        $productRequest->items()->delete();
+        $productRequest->delete();
+
+        return response()->json(['message' => 'تم حذف الطلب بنجاح']);
     }
 
     /**

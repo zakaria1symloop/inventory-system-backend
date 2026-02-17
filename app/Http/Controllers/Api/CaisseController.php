@@ -38,6 +38,47 @@ class CaisseController extends Controller
     }
 
     /**
+     * Create a new caisse for a user
+     */
+    public function store(Request $request)
+    {
+        $user = auth()->user();
+
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        $request->validate([
+            'user_id' => 'required|exists:users,id',
+        ]);
+
+        $targetUser = \App\Models\User::findOrFail($request->user_id);
+
+        // Check if user already has a caisse
+        if ($targetUser->caisse) {
+            return response()->json(['message' => 'هذا المستخدم لديه صندوق بالفعل'], 422);
+        }
+
+        // Determine type from role
+        $typeMap = [
+            'seller' => 'vendeur',
+            'livreur' => 'livreur',
+            'cashvan' => 'cashvan',
+            'admin' => 'principale',
+            'manager' => 'principale',
+        ];
+
+        $type = $typeMap[$targetUser->role] ?? 'vendeur';
+
+        $caisse = Caisse::create([
+            'user_id' => $targetUser->id,
+            'type' => $type,
+        ]);
+
+        return response()->json($caisse->load('user:id,name,role'), 201);
+    }
+
+    /**
      * Show caisse details with recent transactions
      */
     public function show($id)
