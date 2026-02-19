@@ -223,7 +223,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/product-requests/{productRequest}', [ProductRequestController::class, 'destroy']);
 
     // Stock Transfers (Cashvan)
-    Route::apiResource('stock-transfers', StockTransferController::class)->except(['update']);
+    Route::apiResource('stock-transfers', StockTransferController::class);
     Route::post('/stock-transfers/{stockTransfer}/approve', [StockTransferController::class, 'approve']);
     Route::post('/stock-transfers/{stockTransfer}/collect', [StockTransferController::class, 'collect']);
     Route::get('/my-pending-transfers', [StockTransferController::class, 'myPendingTransfers']);

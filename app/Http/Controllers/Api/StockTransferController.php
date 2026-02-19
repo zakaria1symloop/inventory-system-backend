@@ -92,6 +92,57 @@ class StockTransferController extends Controller
     }
 
     /**
+     * Update a pending transfer (warehouses, notes, items)
+     */
+    public function update(Request $request, StockTransfer $stockTransfer)
+    {
+        if (!$stockTransfer->isPending()) {
+            return response()->json(['message' => 'لا يمكن تعديل تحويل تمت الموافقة عليه'], 400);
+        }
+
+        $request->validate([
+            'from_warehouse_id' => 'sometimes|required|exists:warehouses,id',
+            'to_warehouse_id' => 'sometimes|required|exists:warehouses,id',
+            'notes' => 'nullable|string',
+            'items' => 'sometimes|required|array|min:1',
+            'items.*.product_id' => 'required_with:items|exists:products,id',
+            'items.*.quantity' => 'required_with:items|numeric|min:0.01',
+        ]);
+
+        if ($request->has('from_warehouse_id') && $request->has('to_warehouse_id')) {
+            if ($request->from_warehouse_id == $request->to_warehouse_id) {
+                return response()->json(['message' => 'المستودع المصدر والوجهة يجب أن يكونا مختلفين'], 422);
+            }
+        }
+
+        DB::beginTransaction();
+
+        try {
+            $stockTransfer->update($request->only(['from_warehouse_id', 'to_warehouse_id', 'notes']));
+
+            if ($request->has('items')) {
+                $stockTransfer->items()->delete();
+                foreach ($request->items as $item) {
+                    StockTransferItem::create([
+                        'stock_transfer_id' => $stockTransfer->id,
+                        'product_id' => $item['product_id'],
+                        'quantity' => $item['quantity'],
+                    ]);
+                }
+            }
+
+            DB::commit();
+
+            return response()->json(
+                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'items.product'])
+            );
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
      * Show single transfer
      */
     public function show(StockTransfer $stockTransfer)
