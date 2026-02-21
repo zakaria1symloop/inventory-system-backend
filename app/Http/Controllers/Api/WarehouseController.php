@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
 use App\Models\Warehouse;
 use Illuminate\Http\Request;
 
@@ -73,6 +74,36 @@ class WarehouseController extends Controller
         $warehouse->delete();
 
         return response()->json(['message' => 'تم حذف المستودع بنجاح']);
+    }
+
+    public function assignUser(Request $request, Warehouse $warehouse)
+    {
+        $request->validate([
+            'user_id' => 'nullable|exists:users,id',
+        ]);
+
+        $userId = $request->user_id;
+
+        if ($userId) {
+            // Check if this user already has a different warehouse
+            $existingUser = User::find($userId);
+            if ($existingUser->warehouse_id && $existingUser->warehouse_id !== $warehouse->id) {
+                return response()->json([
+                    'message' => 'هذا المستخدم لديه مستودع آخر بالفعل. يجب إزالته من المستودع الحالي أولاً',
+                ], 422);
+            }
+
+            // Remove any other user currently assigned to this warehouse
+            User::where('warehouse_id', $warehouse->id)->update(['warehouse_id' => null]);
+
+            // Assign the new user
+            $existingUser->update(['warehouse_id' => $warehouse->id]);
+        } else {
+            // Unassign: remove any user from this warehouse
+            User::where('warehouse_id', $warehouse->id)->update(['warehouse_id' => null]);
+        }
+
+        return response()->json($warehouse->load('assignedUser:id,name,email,role,warehouse_id'));
     }
 
     public function getStock(Warehouse $warehouse, Request $request)

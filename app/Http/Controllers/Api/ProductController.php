@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client;
+use App\Models\ClientCategory;
 use App\Models\Product;
 use App\Models\ProductCategoryPrice;
 use App\Models\Stock;
@@ -113,8 +114,10 @@ class ProductController extends Controller
             ]);
         }
 
-        // Save category prices
+        // Save category prices and auto-set retail_price from default category
         if ($request->has('category_prices') && is_array($request->category_prices)) {
+            $defaultCategoryId = ClientCategory::where('is_default', true)->value('id');
+
             foreach ($request->category_prices as $cp) {
                 if (!empty($cp['client_category_id']) && isset($cp['price']) && $cp['price'] !== null && $cp['price'] !== '') {
                     ProductCategoryPrice::create([
@@ -122,6 +125,11 @@ class ProductController extends Controller
                         'client_category_id' => $cp['client_category_id'],
                         'price' => $cp['price'],
                     ]);
+
+                    // Auto-set retail_price from default category price
+                    if ($defaultCategoryId && (int) $cp['client_category_id'] === $defaultCategoryId) {
+                        $product->update(['retail_price' => $cp['price']]);
+                    }
                 }
             }
         }
@@ -163,9 +171,11 @@ class ProductController extends Controller
 
         $product->update($data);
 
-        // Update category prices
+        // Update category prices and auto-set retail_price from default category
         if ($request->has('category_prices') && is_array($request->category_prices)) {
             $product->categoryPrices()->delete();
+            $defaultCategoryId = ClientCategory::where('is_default', true)->value('id');
+
             foreach ($request->category_prices as $cp) {
                 if (!empty($cp['client_category_id']) && isset($cp['price']) && $cp['price'] !== null && $cp['price'] !== '') {
                     ProductCategoryPrice::create([
@@ -173,6 +183,11 @@ class ProductController extends Controller
                         'client_category_id' => $cp['client_category_id'],
                         'price' => $cp['price'],
                     ]);
+
+                    // Auto-set retail_price from default category price
+                    if ($defaultCategoryId && (int) $cp['client_category_id'] === $defaultCategoryId) {
+                        $product->update(['retail_price' => $cp['price']]);
+                    }
                 }
             }
         }

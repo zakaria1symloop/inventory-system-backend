@@ -37,7 +37,7 @@ class UserController extends Controller
             });
         }
 
-        $users = $query->latest()->paginate($request->per_page ?? 15);
+        $users = $query->with('warehouse:id,name')->latest()->paginate($request->per_page ?? 15);
 
         return response()->json($users);
     }
@@ -51,7 +51,18 @@ class UserController extends Controller
             'phone' => 'nullable|string',
             'role' => 'required|in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
         ]);
+
+        // Validate one warehouse per user
+        if ($request->warehouse_id) {
+            $existingUser = User::where('warehouse_id', $request->warehouse_id)->first();
+            if ($existingUser) {
+                return response()->json([
+                    'message' => 'هذا المستودع مخصص لمستخدم آخر: ' . $existingUser->name,
+                ], 422);
+            }
+        }
 
         $user = User::create([
             'name' => $request->name,
@@ -60,9 +71,10 @@ class UserController extends Controller
             'phone' => $request->phone,
             'role' => $request->role,
             'is_active' => $request->is_active ?? true,
+            'warehouse_id' => $request->warehouse_id,
         ]);
 
-        return response()->json($user, 201);
+        return response()->json($user->load('warehouse:id,name'), 201);
     }
 
     public function show(User $user)
@@ -79,11 +91,24 @@ class UserController extends Controller
             'role' => 'in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
             'can_collect_debt' => 'boolean',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
         ]);
 
-        $user->update($request->only(['name', 'email', 'phone', 'role', 'is_active', 'can_collect_debt']));
+        // Validate one warehouse per user
+        if ($request->has('warehouse_id') && $request->warehouse_id) {
+            $existingUser = User::where('warehouse_id', $request->warehouse_id)
+                ->where('id', '!=', $user->id)
+                ->first();
+            if ($existingUser) {
+                return response()->json([
+                    'message' => 'هذا المستودع مخصص لمستخدم آخر: ' . $existingUser->name,
+                ], 422);
+            }
+        }
 
-        return response()->json($user);
+        $user->update($request->only(['name', 'email', 'phone', 'role', 'is_active', 'can_collect_debt', 'warehouse_id']));
+
+        return response()->json($user->load('warehouse:id,name'));
     }
 
     public function destroy(User $user)

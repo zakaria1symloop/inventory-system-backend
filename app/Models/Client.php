@@ -28,6 +28,8 @@ class Client extends Model
         'client_category_id',
         'created_by',
         'source',
+        'warehouse_id',
+        'copied_from',
     ];
 
     protected $casts = [
@@ -41,6 +43,21 @@ class Client extends Model
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function warehouse()
+    {
+        return $this->belongsTo(Warehouse::class);
+    }
+
+    public function originalClient()
+    {
+        return $this->belongsTo(Client::class, 'copied_from');
+    }
+
+    public function copies()
+    {
+        return $this->hasMany(Client::class, 'copied_from');
     }
 
     public function clientCategory()

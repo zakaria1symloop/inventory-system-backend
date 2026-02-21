@@ -50,12 +50,13 @@ class CaisseController extends Controller
 
         $request->validate([
             'user_id' => 'required|exists:users,id',
+            'name' => 'nullable|string|max:255',
         ]);
 
         $targetUser = \App\Models\User::findOrFail($request->user_id);
 
-        // Check if user already has a caisse
-        if ($targetUser->caisse) {
+        // Only admin can have multiple caisses
+        if ($targetUser->role !== 'admin' && Caisse::where('user_id', $targetUser->id)->exists()) {
             return response()->json(['message' => 'هذا المستخدم لديه صندوق بالفعل'], 422);
         }
 
@@ -73,9 +74,32 @@ class CaisseController extends Controller
         $caisse = Caisse::create([
             'user_id' => $targetUser->id,
             'type' => $type,
+            'name' => $request->name,
         ]);
 
         return response()->json($caisse->load('user:id,name,role'), 201);
+    }
+
+    /**
+     * Update caisse name
+     */
+    public function update(Request $request, $id)
+    {
+        $user = auth()->user();
+
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        $caisse = Caisse::findOrFail($id);
+
+        $request->validate([
+            'name' => 'nullable|string|max:255',
+        ]);
+
+        $caisse->update($request->only('name'));
+
+        return response()->json($caisse->load('user:id,name,role'));
     }
 
     /**

@@ -14,14 +14,19 @@ class ClientController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Client::with(['clientCategory', 'creator:id,name']);
+        $query = Client::with(['clientCategory', 'creator:id,name', 'warehouse:id,name', 'originalClient:id,name']);
 
-        // Seller visibility: sellers only see their own clients unless setting allows
+        // Visibility: non-admin users see only clients from their warehouse
         $user = auth()->user();
-        if (in_array($user->role, ['seller', 'livreur'])) {
+        if (in_array($user->role, ['seller', 'livreur', 'cashvan'])) {
             $canSeeAll = Setting::get('seller_see_all_clients', 'false') === 'true';
             if (!$canSeeAll) {
-                $query->where('created_by', $user->id);
+                if ($user->warehouse_id) {
+                    $query->where('warehouse_id', $user->warehouse_id);
+                } else {
+                    // No warehouse assigned - fall back to created_by
+                    $query->where('created_by', $user->id);
+                }
             }
         }
 
@@ -101,10 +106,16 @@ class ClientController extends Controller
             'credit_limit' => 'nullable|numeric|min:0',
             'is_active' => 'boolean',
             'client_category_id' => 'nullable|exists:client_categories,id',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
         ]);
 
         $data = $request->all();
         $data['created_by'] = auth()->id();
+
+        // Auto-assign warehouse from creating user if not provided
+        if (empty($data['warehouse_id']) && auth()->user()->warehouse_id) {
+            $data['warehouse_id'] = auth()->user()->warehouse_id;
+        }
 
         // Auto-assign default client category if none provided
         if (empty($data['client_category_id'])) {
@@ -140,6 +151,7 @@ class ClientController extends Controller
             'credit_limit' => 'nullable|numeric|min:0',
             'is_active' => 'boolean',
             'client_category_id' => 'nullable|exists:client_categories,id',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
         ]);
 
         $client->update($request->all());
@@ -225,5 +237,83 @@ class ClientController extends Controller
                 'total_remaining' => $sales->sum('due_amount'),
             ],
         ]);
+    }
+
+    /**
+     * Transfer clients to a different warehouse
+     */
+    public function transferToWarehouse(Request $request)
+    {
+        $request->validate([
+            'client_ids' => 'required|array|min:1',
+            'client_ids.*' => 'exists:clients,id',
+            'warehouse_id' => 'required|exists:warehouses,id',
+        ]);
+
+        $count = Client::whereIn('id', $request->client_ids)
+            ->update(['warehouse_id' => $request->warehouse_id]);
+
+        return response()->json([
+            'message' => "تم نقل {$count} عميل بنجاح",
+            'count' => $count,
+        ]);
+    }
+
+    /**
+     * Copy (duplicate) clients to another warehouse
+     */
+    public function copyToWarehouse(Request $request)
+    {
+        $request->validate([
+            'client_ids' => 'required|array|min:1',
+            'client_ids.*' => 'exists:clients,id',
+            'warehouse_id' => 'required|exists:warehouses,id',
+        ]);
+
+        $clients = Client::whereIn('id', $request->client_ids)->get();
+        $count = 0;
+
+        foreach ($clients as $client) {
+            $newClient = $client->replicate();
+            $newClient->warehouse_id = $request->warehouse_id;
+            $newClient->balance = 0;
+            $newClient->created_by = auth()->id();
+            $newClient->copied_from = $client->id;
+            $newClient->save();
+            $count++;
+        }
+
+        return response()->json([
+            'message' => "تم نسخ {$count} عميل بنجاح",
+            'count' => $count,
+        ]);
+    }
+
+    /**
+     * Cancel copy - delete the copied client
+     */
+    public function cancelCopy(Client $client)
+    {
+        if (!$client->copied_from) {
+            return response()->json(['message' => 'هذا العميل ليس نسخة'], 422);
+        }
+
+        $client->delete();
+
+        return response()->json(['message' => 'تم إلغاء النسخة بنجاح']);
+    }
+
+    /**
+     * Remove copy flag - make a copied client normal
+     */
+    public function removeCopyFlag(Client $client)
+    {
+        if (!$client->copied_from) {
+            return response()->json(['message' => 'هذا العميل ليس نسخة'], 422);
+        }
+
+        $client->update(['copied_from' => null]);
+
+        return response()->json(['message' => 'تم تحويل العميل إلى عميل عادي']);
     }
 }

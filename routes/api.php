@@ -74,9 +74,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('units', UnitController::class);
     Route::post('/units/convert', [UnitController::class, 'convert']);
 
-    // Warehouses
-    Route::apiResource('warehouses', WarehouseController::class);
+    // Warehouses - custom routes before apiResource
+    Route::post('/warehouses/{warehouse}/assign', [WarehouseController::class, 'assignUser']);
     Route::get('/warehouses/{warehouse}/stock', [WarehouseController::class, 'getStock']);
+    Route::apiResource('warehouses', WarehouseController::class);
 
     // Products - specific routes MUST come before apiResource
     Route::get('/products/generate-barcode', [ProductController::class, 'generateBarcode']);
@@ -94,11 +95,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('client-categories', ClientCategoryController::class);
 
     // Clients
+    Route::post('/clients/transfer-warehouse', [ClientController::class, 'transferToWarehouse']);
+    Route::post('/clients/copy-warehouse', [ClientController::class, 'copyToWarehouse']);
     Route::apiResource('clients', ClientController::class);
     Route::get('/clients/{client}/balance', [ClientController::class, 'getBalance']);
     Route::get('/clients/{client}/orders', [ClientController::class, 'getOrders']);
     Route::get('/clients/{client}/sales', [ClientController::class, 'getSales']);
     Route::get('/clients/{client}/sales-debt', [ClientController::class, 'getSalesDebt']);
+    Route::delete('/clients/{client}/cancel-copy', [ClientController::class, 'cancelCopy']);
+    Route::post('/clients/{client}/remove-copy-flag', [ClientController::class, 'removeCopyFlag']);
 
     // Suppliers
     Route::apiResource('suppliers', SupplierController::class);
@@ -317,6 +322,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/caisses/{id}/settle', [CaisseController::class, 'settle']);
     Route::get('/caisses', [CaisseController::class, 'index']);
     Route::post('/caisses', [CaisseController::class, 'store']);
+    Route::put('/caisses/{id}', [CaisseController::class, 'update']);
     Route::get('/caisses/{id}', [CaisseController::class, 'show']);
 
     // Dispenses (Expenses)

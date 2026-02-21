@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 class Caisse extends Model
 {
     protected $fillable = [
+        'name',
         'user_id',
         'type',
         'balance',
