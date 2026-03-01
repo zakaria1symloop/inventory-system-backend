@@ -15,6 +15,11 @@ class ProductRequestItem extends Model
         'notes',
     ];
 
+    protected $casts = [
+        'quantity_requested' => 'integer',
+        'quantity_approved' => 'integer',
+    ];
+
     public function productRequest(): BelongsTo
     {
         return $this->belongsTo(ProductRequest::class);
