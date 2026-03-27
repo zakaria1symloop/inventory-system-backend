@@ -145,8 +145,8 @@ use App\Helpers\ArabicHelper;
                     </div>
                     @endif
                     @endif
-                    <div class="company-name">{{ $settings['company_name'] ?? 'RAFIK BISKRA' }}</div>
-                    <div>{{ $settings['company_address'] ?? 'Biskra, Algerie' }}</div>
+                    <div class="company-name">{{ ArabicHelper::safe($settings['company_name'] ?? null, 'RAFIK BISKRA') }}</div>
+                    <div>{{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}</div>
                     <div>Tel: {{ $settings['company_phone'] ?? '' }}</div>
                     @if(!empty($settings['company_email']))
                     <div>Email: {{ $settings['company_email'] }}</div>
@@ -169,8 +169,8 @@ use App\Helpers\ArabicHelper;
             <td style="width: 50%; text-align: right; padding-left: 10px;">
                 <div style="font-size: 10px;">
                     <strong>Date:</strong> {{ $sale->date ? \Carbon\Carbon::parse($sale->date)->format('d/m/Y') : '-' }}<br>
-                    <strong>Entrepot:</strong> {{ $sale->warehouse->name ?? '-' }}<br>
-                    <strong>Vendeur:</strong> {{ $sale->user->name ?? '-' }}
+                    <strong>Entrepot:</strong> {{ ArabicHelper::safe($sale->warehouse->name ?? null, '-') }}<br>
+                    <strong>Vendeur:</strong> {{ ArabicHelper::safe($sale->user->name ?? null, '-') }}
                 </div>
             </td>
         </tr>
@@ -231,18 +231,23 @@ use App\Helpers\ArabicHelper;
         <thead>
             <tr>
                 <th style="width: 4%;">N°</th>
-                <th style="width: 30%;">Designation</th>
-                <th style="width: 10%;">Unite (Pcs)</th>
-                <th style="width: 8%;">Qte</th>
-                <th style="width: 10%;">Nb Pieces</th>
-                <th style="width: 12%;">P.U</th>
-                <th style="width: 10%;">Remise</th>
-                <th style="width: 16%;">Montant</th>
+                <th style="width: 22%;">Designation</th>
+                <th style="width: 7%;">Unite</th>
+                <th style="width: 6%;">Qte</th>
+                <th style="width: 7%;">Pcs</th>
+                <th style="width: 9%;">P.U</th>
+                <th style="width: 7%;">Remise</th>
+                <th style="width: 10%;">Montant HT</th>
+                <th style="width: 5%;">TVA%</th>
+                <th style="width: 9%;">TVA</th>
+                <th style="width: 11%;">Montant TTC</th>
             </tr>
         </thead>
         <tbody>
             @php
                 $totalPieces = 0;
+                $totalHt = 0;
+                $totalTva = 0;
             @endphp
             @foreach($sale->items ?? [] as $index => $item)
             @php
@@ -251,29 +256,37 @@ use App\Helpers\ArabicHelper;
                 $piecesPerPkg = $product->pieces_per_package ?? 1;
                 $unitShortName = $product->unitSale->short_name ?? 'U';
                 $qty = $item->quantity ?? 0;
-                $nbPieces = $qty * $piecesPerPkg;
+                $nbPieces = $qty;
                 $totalPieces += $nbPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                // Use the stored subtotal which includes pieces_per_package calculation
-                $lineTotal = $item->subtotal ?? (($unitPrice * $piecesPerPkg * $qty) - $itemDiscount);
+                // Montant HT = price * qty - discount (before tax)
+                $montantHt = ($unitPrice * $qty) - $itemDiscount;
+                $totalHt += $montantHt;
+                $productTaxPercent = $product->tax_percent ?? 0;
+                $lineTva = $montantHt * $productTaxPercent / 100;
+                $totalTva += $lineTva;
             @endphp
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
                 <td class="text-left">{{ ArabicHelper::safe($productName, 'Produit') }}</td>
                 <td class="text-center">
-                    {{ $unitShortName }}
+                    {{ ArabicHelper::safe($unitShortName) }}
                     @if($piecesPerPkg > 1)
                     <br><span style="font-size: 7px; color: #666;">({{ $piecesPerPkg }} pcs)</span>
                     @endif
                 </td>
                 <td class="text-center">
-                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                    @if($piecesPerPkg > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                            $cartons = intval(floor($qty / $piecesPerPkg));
+                            $extraPieces = $qty % $piecesPerPkg;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        @if($extraPieces > 0)
+                            {{ $cartons }} + {{ $extraPieces }}ق
+                        @else
+                            {{ $cartons }}
+                        @endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif
@@ -286,26 +299,27 @@ use App\Helpers\ArabicHelper;
                     @endif
                 </td>
                 <td class="text-right">{{ number_format($itemDiscount, 2) }}</td>
-                <td class="text-right">{{ number_format($lineTotal, 2) }}</td>
+                <td class="text-right">{{ number_format($montantHt, 2) }}</td>
+                <td class="text-center">{{ $productTaxPercent > 0 ? number_format($productTaxPercent, 0) . '%' : '-' }}</td>
+                <td class="text-right">{{ $productTaxPercent > 0 ? number_format($lineTva, 2) : '-' }}</td>
+                <td class="text-right" style="font-weight: bold;">{{ number_format($montantHt + $lineTva, 2) }}</td>
             </tr>
             @endforeach
         </tbody>
     </table>
 
     @php
-        // Use stored totals from database (already includes pieces_per_package)
-        $calculatedTotal = $sale->total_amount ?? 0;
         $saleDiscount = $sale->discount ?? 0;
-        $saleTax = $sale->tax ?? 0;
         $saleShipping = $sale->shipping ?? 0;
-        $grandTotal = $sale->grand_total ?? ($calculatedTotal - $saleDiscount + $saleTax + $saleShipping);
+        $saleTimbre = $sale->timbre ?? 0;
+        $grandTotal = $sale->grand_total ?? ($totalHt + $totalTva - $saleDiscount + $saleShipping + $saleTimbre);
     @endphp
 
     <!-- Totals -->
     <table class="totals-box">
         <tr>
             <td style="text-align: left;"><strong>Total HT:</strong></td>
-            <td style="text-align: right;">{{ number_format($calculatedTotal, 2) }} DA</td>
+            <td style="text-align: right;">{{ number_format($totalHt, 2) }} DA</td>
         </tr>
         @if($saleDiscount > 0)
         <tr>
@@ -313,16 +327,20 @@ use App\Helpers\ArabicHelper;
             <td style="text-align: right; color: red;">- {{ number_format($saleDiscount, 2) }} DA</td>
         </tr>
         @endif
-        @if($saleTax > 0)
         <tr>
             <td style="text-align: left;">TVA:</td>
-            <td style="text-align: right;">{{ number_format($saleTax, 2) }} DA</td>
+            <td style="text-align: right;">{{ number_format($totalTva, 2) }} DA</td>
         </tr>
-        @endif
         @if($saleShipping > 0)
         <tr>
             <td style="text-align: left;">Livraison:</td>
             <td style="text-align: right;">{{ number_format($saleShipping, 2) }} DA</td>
+        </tr>
+        @endif
+        @if($saleTimbre > 0)
+        <tr>
+            <td style="text-align: left;">Timbre:</td>
+            <td style="text-align: right;">{{ number_format($saleTimbre, 2) }} DA</td>
         </tr>
         @endif
         <tr class="grand-total">

@@ -20,9 +20,9 @@ class DeliveryStock extends Model
     ];
 
     protected $casts = [
-        'quantity_loaded' => 'decimal:2',
-        'quantity_delivered' => 'decimal:2',
-        'quantity_returned' => 'decimal:2',
+        'quantity_loaded' => 'integer',
+        'quantity_delivered' => 'integer',
+        'quantity_returned' => 'integer',
     ];
 
     public function delivery()

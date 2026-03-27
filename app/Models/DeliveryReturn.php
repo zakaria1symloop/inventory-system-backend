@@ -25,7 +25,7 @@ class DeliveryReturn extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
         'unit_cost' => 'decimal:2',
         'loss_amount' => 'decimal:2',
         'returnable_to_stock' => 'boolean',
@@ -86,8 +86,24 @@ class DeliveryReturn extends Model
             $orderItem->save();
         }
 
+        // Deduct from livreur's warehouse (items were there since delivery started)
+        $livreur = $this->delivery->livreur;
+        $livreurWarehouseId = $livreur ? $livreur->warehouse_id : null;
+        if ($livreurWarehouseId && $livreurWarehouseId != $warehouseId) {
+            StockMovement::record(
+                $this->product_id,
+                $livreurWarehouseId,
+                $this->quantity,
+                StockMovement::TYPE_TRANSFER,
+                $this->delivery->reference,
+                $this->delivery,
+                null,
+                'إرجاع مرتجع للمستودع'
+            );
+        }
+
         if ($this->returnable_to_stock) {
-            // Add stock back to warehouse and record movement
+            // Add stock back to target warehouse and record movement
             StockMovement::record(
                 $this->product_id,
                 $warehouseId,

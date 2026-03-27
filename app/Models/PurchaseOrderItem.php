@@ -20,7 +20,7 @@ class PurchaseOrderItem extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
         'unit_price' => 'decimal:2',
         'discount' => 'decimal:2',
         'tax' => 'decimal:2',

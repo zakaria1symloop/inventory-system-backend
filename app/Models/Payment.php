@@ -2,13 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Payment extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes, GeneratesReference;
+
+    protected static string $referencePrefix = 'PAY';
 
     protected $fillable = [
         'reference',
@@ -25,34 +28,6 @@ class Payment extends Model
         'date' => 'date',
         'amount' => 'decimal:2',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (!$model->reference) {
-                $model->reference = self::generateReference();
-            }
-        });
-    }
-
-    public static function generateReference()
-    {
-        $prefix = 'PAY';
-        $date = now()->format('Ymd');
-
-        // Use database locking to prevent race conditions
-        // Find the last payment with today's date pattern in reference
-        $last = self::where('reference', 'LIKE', $prefix . $date . '%')
-            ->lockForUpdate()
-            ->latest('id')
-            ->first();
-
-        $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
-
-        return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-    }
 
     public function payable()
     {

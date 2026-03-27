@@ -15,6 +15,8 @@ return [
 
     'name' => env('APP_NAME', 'Laravel'),
 
+    'frontend_url' => env('FRONTEND_URL', 'http://localhost:3001'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Environment
@@ -134,5 +136,17 @@ return [
         'driver' => env('APP_MAINTENANCE_DRIVER', 'file'),
         'store' => env('APP_MAINTENANCE_STORE', 'database'),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Tenant App Version
+    |--------------------------------------------------------------------------
+    |
+    | The current version of the tenant application. When pushing updates,
+    | tenant databases are migrated and their app_version is bumped to this.
+    |
+    */
+
+    'tenant_version' => env('TENANT_APP_VERSION', '1.0'),
 
 ];

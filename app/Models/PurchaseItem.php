@@ -21,7 +21,7 @@ class PurchaseItem extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
         'unit_price' => 'decimal:2',
         'discount' => 'decimal:2',
         'tax' => 'decimal:2',
@@ -32,15 +32,13 @@ class PurchaseItem extends Model
     {
         parent::boot();
 
-        // Subtotal = unit_price (per piece) × pieces_per_package × quantity - discount + tax
+        // Subtotal = unit_price (per piece) × quantity (pieces) - discount + tax
         static::creating(function ($model) {
-            $piecesPerPackage = $model->product->pieces_per_package ?? 1;
-            $model->subtotal = ($model->unit_price * $piecesPerPackage * $model->quantity) - $model->discount + $model->tax;
+            $model->subtotal = ($model->unit_price * $model->quantity) - $model->discount + $model->tax;
         });
 
         static::updating(function ($model) {
-            $piecesPerPackage = $model->product->pieces_per_package ?? 1;
-            $model->subtotal = ($model->unit_price * $piecesPerPackage * $model->quantity) - $model->discount + $model->tax;
+            $model->subtotal = ($model->unit_price * $model->quantity) - $model->discount + $model->tax;
         });
     }
 

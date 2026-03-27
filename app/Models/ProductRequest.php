@@ -2,12 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ProductRequest extends Model
 {
+    use GeneratesReference;
+
+    protected static string $referencePrefix = 'PR';
     protected $fillable = [
         'reference',
         'van_session_id',
@@ -23,19 +27,6 @@ class ProductRequest extends Model
     protected $casts = [
         'processed_at' => 'datetime',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (empty($model->reference)) {
-                $today = now()->format('Ymd');
-                $count = static::whereDate('created_at', now()->toDateString())->count() + 1;
-                $model->reference = 'PR' . $today . str_pad($count, 4, '0', STR_PAD_LEFT);
-            }
-        });
-    }
 
     public function vanSession(): BelongsTo
     {

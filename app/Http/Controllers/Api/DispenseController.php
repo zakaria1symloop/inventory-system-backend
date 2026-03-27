@@ -131,6 +131,21 @@ class DispenseController extends Controller
         ]);
     }
 
+    public function deleteOld(Request $request)
+    {
+        $request->validate([
+            'before_date' => 'required|date',
+        ]);
+
+        $count = Dispense::whereDate('date', '<', $request->before_date)->count();
+        Dispense::whereDate('date', '<', $request->before_date)->delete();
+
+        return response()->json([
+            'message' => "تم حذف {$count} مصروف قديم بنجاح",
+            'count' => $count,
+        ]);
+    }
+
     public function getCategories()
     {
         return response()->json(Dispense::getCategories());

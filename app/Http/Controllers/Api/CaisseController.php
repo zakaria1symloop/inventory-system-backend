@@ -350,6 +350,49 @@ class CaisseController extends Controller
     }
 
     /**
+     * Admin: adjust caisse balance (add or remove money)
+     */
+    public function adjust(Request $request, $id)
+    {
+        $user = auth()->user();
+
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'فقط المدير يمكنه تعديل الرصيد'], 403);
+        }
+
+        $request->validate([
+            'amount' => 'required|numeric|min:0.01',
+            'type' => 'required|in:add,remove',
+            'notes' => 'nullable|string|max:500',
+        ]);
+
+        $caisse = Caisse::findOrFail($id);
+
+        if ($request->type === 'remove' && $request->amount > $caisse->balance) {
+            return response()->json(['message' => 'المبلغ أكبر من الرصيد الحالي'], 422);
+        }
+
+        $txType = $request->type === 'add' ? 'in' : 'out';
+        $description = $request->type === 'add'
+            ? 'إضافة رصيد: ' . ($request->notes ?? 'تعديل إداري')
+            : 'خصم رصيد: ' . ($request->notes ?? 'تعديل إداري');
+
+        $caisse->addTransaction(
+            $txType,
+            $request->amount,
+            'adjustment',
+            null,
+            $description,
+            $user->id
+        );
+
+        return response()->json([
+            'message' => $request->type === 'add' ? 'تم إضافة الرصيد بنجاح' : 'تم خصم الرصيد بنجاح',
+            'caisse' => $caisse->fresh()->load('user:id,name,role'),
+        ]);
+    }
+
+    /**
      * Admin: summary of all caisses
      */
     public function summary(Request $request)

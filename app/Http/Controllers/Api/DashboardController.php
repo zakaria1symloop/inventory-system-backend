@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Caisse;
 use App\Models\Client;
 use App\Models\Delivery;
 use App\Models\Order;
@@ -12,6 +13,8 @@ use App\Models\Sale;
 use App\Models\Stock;
 use App\Models\Supplier;
 use App\Models\Trip;
+use App\Models\User;
+use App\Models\Warehouse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -128,7 +131,7 @@ class DashboardController extends Controller
     {
         $products = Product::with(['stock.warehouse'])
             ->whereHas('stock', function ($q) {
-                $q->whereRaw('quantity <= products.stock_alert');
+                $q->whereRaw('quantity <= products.stock_alert * COALESCE(products.pieces_per_package, 1)');
             })
             ->get()
             ->map(function ($product) {
@@ -153,7 +156,7 @@ class DashboardController extends Controller
     private function getLowStockCount()
     {
         return Product::whereHas('stock', function ($q) {
-            $q->whereRaw('quantity <= products.stock_alert');
+            $q->whereRaw('quantity <= products.stock_alert * COALESCE(products.pieces_per_package, 1)');
         })->count();
     }
 
@@ -205,5 +208,180 @@ class DashboardController extends Controller
         $delivered = $deliveriesQuery->sum('delivered_count');
 
         return $total > 0 ? round(($delivered / $total) * 100, 2) : 0;
+    }
+
+    public function getSystemHealth()
+    {
+        $user = auth()->user();
+        if (!$user->isAdmin()) {
+            return response()->json([]);
+        }
+
+        $alerts = [];
+
+        // 1. Users without caisse
+        $usersWithoutCaisse = User::whereDoesntHave('caisse')
+            ->whereIn('role', ['admin', 'seller', 'livreur', 'cashvan'])
+            ->where('email', '!=', 'admin@symloop.com')
+            ->select('id', 'name', 'role')
+            ->get();
+
+        if ($usersWithoutCaisse->isNotEmpty()) {
+            $alerts[] = [
+                'type' => 'warning',
+                'title' => 'مستخدمون بدون صندوق',
+                'message' => $usersWithoutCaisse->count() . ' مستخدم بدون صندوق مالي',
+                'count' => $usersWithoutCaisse->count(),
+                'items' => $usersWithoutCaisse,
+                'action' => 'fix_caisses',
+            ];
+        }
+
+        // 2. Livreur/cashvan without warehouse
+        $usersWithoutWarehouse = User::whereNull('warehouse_id')
+            ->whereIn('role', ['livreur', 'cashvan'])
+            ->where('is_active', true)
+            ->select('id', 'name', 'role')
+            ->get();
+
+        if ($usersWithoutWarehouse->isNotEmpty()) {
+            $alerts[] = [
+                'type' => 'warning',
+                'title' => 'سائقون بدون مستودع',
+                'message' => $usersWithoutWarehouse->count() . ' مستخدم بدون مستودع مخصص',
+                'count' => $usersWithoutWarehouse->count(),
+                'items' => $usersWithoutWarehouse,
+            ];
+        }
+
+        // 3. Caisses with balance belonging to inactive users
+        $orphanedCaisses = Caisse::where('balance', '>', 0)
+            ->whereHas('user', fn($q) => $q->where('is_active', false))
+            ->with('user:id,name')
+            ->get();
+
+        if ($orphanedCaisses->isNotEmpty()) {
+            $total = $orphanedCaisses->sum('balance');
+            $alerts[] = [
+                'type' => 'danger',
+                'title' => 'صناديق بها رصيد لمستخدمين غير نشطين',
+                'message' => $orphanedCaisses->count() . ' صندوق - إجمالي: ' . number_format($total, 2) . ' د.ج',
+                'count' => $orphanedCaisses->count(),
+                'items' => $orphanedCaisses->map(fn($c) => [
+                    'id' => $c->id,
+                    'user_name' => $c->user?->name ?? 'محذوف',
+                    'balance' => (float) $c->balance,
+                ]),
+            ];
+        }
+
+        // 4. Negative stock
+        $negativeStock = Stock::where('quantity', '<', 0)
+            ->with(['product:id,name', 'warehouse:id,name'])
+            ->get();
+
+        if ($negativeStock->isNotEmpty()) {
+            $alerts[] = [
+                'type' => 'danger',
+                'title' => 'مخزون سالب',
+                'message' => $negativeStock->count() . ' منتج بمخزون سالب',
+                'count' => $negativeStock->count(),
+                'items' => $negativeStock->take(10)->map(fn($s) => [
+                    'product' => $s->product?->name,
+                    'warehouse' => $s->warehouse?->name,
+                    'quantity' => $s->quantity,
+                ]),
+            ];
+        }
+
+        // 5. Clients with debt
+        $debtorCount = Client::where('balance', '<', 0)->count();
+        if ($debtorCount > 0) {
+            $totalDebt = Client::where('balance', '<', 0)->sum('balance');
+            $alerts[] = [
+                'type' => 'info',
+                'title' => 'عملاء مدينون',
+                'message' => $debtorCount . ' عميل - إجمالي الديون: ' . number_format(abs($totalDebt), 2) . ' د.ج',
+                'count' => $debtorCount,
+            ];
+        }
+
+        // 6. Stale pending orders (>3 days)
+        $staleOrders = Order::where('status', 'pending')
+            ->where('date', '<', now()->subDays(3)->toDateString())
+            ->count();
+
+        if ($staleOrders > 0) {
+            $alerts[] = [
+                'type' => 'warning',
+                'title' => 'طلبات معلقة لأكثر من 3 أيام',
+                'message' => $staleOrders . ' طلب معلق يحتاج مراجعة',
+                'count' => $staleOrders,
+            ];
+        }
+
+        // 7. Active products with zero stock
+        $zeroStockProducts = Product::where('is_active', true)
+            ->whereDoesntHave('stock', fn($q) => $q->where('quantity', '>', 0))
+            ->count();
+
+        if ($zeroStockProducts > 0) {
+            $alerts[] = [
+                'type' => 'info',
+                'title' => 'منتجات بدون مخزون',
+                'message' => $zeroStockProducts . ' منتج نشط بدون أي مخزون',
+                'count' => $zeroStockProducts,
+            ];
+        }
+
+        // 8. Non-main warehouses without assigned user
+        $unassignedWarehouses = Warehouse::where('is_active', true)
+            ->where('is_main', false)
+            ->whereDoesntHave('assignedUser')
+            ->count();
+
+        if ($unassignedWarehouses > 0) {
+            $alerts[] = [
+                'type' => 'info',
+                'title' => 'مستودعات بدون مستخدم',
+                'message' => $unassignedWarehouses . ' مستودع فرعي غير مخصص',
+                'count' => $unassignedWarehouses,
+            ];
+        }
+
+        return response()->json($alerts);
+    }
+
+    public function fixMissingCaisses()
+    {
+        $user = auth()->user();
+        if (!$user->isAdmin()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        $typeMap = [
+            'seller' => 'vendeur',
+            'livreur' => 'livreur',
+            'cashvan' => 'cashvan',
+            'admin' => 'principale',
+        ];
+
+        $usersWithoutCaisse = User::whereDoesntHave('caisse')
+            ->whereIn('role', array_keys($typeMap))
+            ->get();
+
+        $fixed = 0;
+        foreach ($usersWithoutCaisse as $u) {
+            Caisse::create([
+                'user_id' => $u->id,
+                'type' => $typeMap[$u->role],
+            ]);
+            $fixed++;
+        }
+
+        return response()->json([
+            'message' => "تم إنشاء {$fixed} صندوق",
+            'fixed' => $fixed,
+        ]);
     }
 }

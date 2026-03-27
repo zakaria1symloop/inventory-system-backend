@@ -64,7 +64,7 @@ class OrderController extends Controller
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0',
         ]);
@@ -268,7 +268,7 @@ class OrderController extends Controller
     public function updateItemQuantity(Request $request, Order $order, OrderItem $item)
     {
         $request->validate([
-            'quantity_confirmed' => 'required|numeric|min:0',
+            'quantity_confirmed' => 'required|integer|min:0',
         ]);
 
         if ($request->quantity_confirmed > $item->quantity_ordered) {

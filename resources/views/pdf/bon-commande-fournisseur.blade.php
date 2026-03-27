@@ -174,8 +174,8 @@ use App\Helpers\ArabicHelper;
                     </div>
                     @endif
                     @endif
-                    <div class="company-name">{{ $settings['company_name'] ?? 'RAFIK BISKRA' }}</div>
-                    <div>{{ $settings['company_address'] ?? 'Biskra, Algerie' }}</div>
+                    <div class="company-name">{{ ArabicHelper::safe($settings['company_name'] ?? null, 'RAFIK BISKRA') }}</div>
+                    <div>{{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}</div>
                     <div>Tel: {{ $settings['company_phone'] ?? '' }}</div>
                     @if(!empty($settings['company_email']))
                     <div>Email: {{ $settings['company_email'] }}</div>
@@ -196,8 +196,8 @@ use App\Helpers\ArabicHelper;
                     @if($order->expected_delivery_date)
                     <strong>Livraison Prevue:</strong> {{ \Carbon\Carbon::parse($order->expected_delivery_date)->format('d/m/Y') }}<br>
                     @endif
-                    <strong>Entrepot:</strong> {{ $order->warehouse->name ?? '-' }}<br>
-                    <strong>Demandeur:</strong> {{ $order->user->name ?? '-' }}<br>
+                    <strong>Entrepot:</strong> {{ ArabicHelper::safe($order->warehouse->name ?? null, '-') }}<br>
+                    <strong>Demandeur:</strong> {{ ArabicHelper::safe($order->user->name ?? null, '-') }}<br>
                     <span class="status-badge status-{{ $order->status }}">
                         @switch($order->status)
                             @case('draft') Brouillon @break
@@ -292,25 +292,25 @@ use App\Helpers\ArabicHelper;
                 $totalQty += $qty;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                // Use stored subtotal (includes pieces_per_package in calculation)
-                $subtotal = $item->subtotal ?? (($unitPrice * $piecesPerPackage * $qty) - $itemDiscount);
+                // quantity is already in pieces, no need to multiply by pieces_per_package
+                $subtotal = $item->subtotal ?? (($unitPrice * $qty) - $itemDiscount);
                 $calculatedTotal += $subtotal;
             @endphp
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
                 <td class="text-left">{{ ArabicHelper::safe($productName, 'Produit') }}</td>
                 <td class="text-center" style="font-size: 12px; font-weight: bold; color: #065f46;">
-                    @if($piecesPerPackage > 1 && $qty != floor($qty))
+                    @if($piecesPerPackage > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPackage);
+                            $cartons = intval(floor($qty / $piecesPerPackage));
+                            $extraPieces = $qty % $piecesPerPackage;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        {{ $cartons }}@if($extraPieces > 0) + {{ $extraPieces }}ق@endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif
                 </td>
-                <td class="text-center">{{ $unitName }}</td>
+                <td class="text-center">{{ ArabicHelper::safe($unitName) }}</td>
                 <td class="text-center" style="color: #666;">{{ $piecesPerPackage > 1 ? $piecesPerPackage : '-' }}</td>
                 <td class="text-right">
                     {{ number_format($unitPrice, 2) }}
@@ -379,7 +379,7 @@ use App\Helpers\ArabicHelper;
             {!! nl2br(e($order->terms)) !!}
         @else
             <div>- Delai de livraison: A convenir</div>
-            <div>- Lieu de livraison: {{ $order->warehouse->name ?? 'Entrepot principal' }}</div>
+            <div>- Lieu de livraison: {{ ArabicHelper::safe($order->warehouse->name ?? null, 'Entrepot principal') }}</div>
             <div>- Mode de paiement: A la livraison / Cheque / Virement</div>
         @endif
     </div>

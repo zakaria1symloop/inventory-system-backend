@@ -11,7 +11,7 @@ return new class extends Migration
         Schema::create('payments', function (Blueprint $table) {
             $table->id();
             $table->string('reference')->unique();
-            $table->morphs('payable');
+            $table->nullableMorphs('payable');
             $table->decimal('amount', 12, 2);
             $table->string('payment_method')->default('cash');
             $table->date('date');

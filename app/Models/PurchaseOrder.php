@@ -2,12 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class PurchaseOrder extends Model
 {
-    use HasFactory;
+    use HasFactory, GeneratesReference;
+
+    protected static string $referencePrefix = 'BC';
+    protected static string $referenceSeparator = '-';
 
     protected $fillable = [
         'reference',
@@ -36,30 +40,6 @@ class PurchaseOrder extends Model
         'shipping' => 'decimal:2',
         'grand_total' => 'decimal:2',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (empty($model->reference)) {
-                $model->reference = self::generateReference();
-            }
-        });
-    }
-
-    public static function generateReference(): string
-    {
-        $prefix = 'BC-';
-        $date = now()->format('Ymd');
-        $lastOrder = self::whereDate('created_at', today())
-            ->orderBy('id', 'desc')
-            ->first();
-
-        $sequence = $lastOrder ? (intval(substr($lastOrder->reference, -4)) + 1) : 1;
-
-        return $prefix . $date . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-    }
 
     public function supplier()
     {

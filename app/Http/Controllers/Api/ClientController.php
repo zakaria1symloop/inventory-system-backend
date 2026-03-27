@@ -9,6 +9,7 @@ use App\Models\DeliveryOrder;
 use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Barryvdh\DomPDF\Facade\Pdf;
 
 class ClientController extends Controller
 {
@@ -277,6 +278,7 @@ class ClientController extends Controller
             $newClient = $client->replicate();
             $newClient->warehouse_id = $request->warehouse_id;
             $newClient->balance = 0;
+            $newClient->code = null;
             $newClient->created_by = auth()->id();
             $newClient->copied_from = $client->id;
             $newClient->save();
@@ -315,5 +317,157 @@ class ClientController extends Controller
         $client->update(['copied_from' => null]);
 
         return response()->json(['message' => 'تم تحويل العميل إلى عميل عادي']);
+    }
+
+    /**
+     * Build statement operations for a client
+     */
+    private function buildStatementData(Client $client, $dateFrom, $dateTo)
+    {
+        // Get ALL completed sales for this client
+        $salesQuery = \App\Models\Sale::where('client_id', $client->id)
+            ->where('status', 'completed');
+
+        // Get all sale IDs for this client (for payment lookup)
+        $allSaleIds = (clone $salesQuery)->pluck('id');
+
+        // Opening balance: sales before date_from - payments before date_from
+        $salesBeforeSum = (clone $salesQuery)->where('date', '<', $dateFrom)->sum('grand_total');
+        $paymentsBeforeSum = \App\Models\Payment::where('payable_type', \App\Models\Sale::class)
+            ->whereIn('payable_id', $allSaleIds)
+            ->where('date', '<', $dateFrom)
+            ->whereNull('deleted_at')
+            ->sum('amount');
+        $openingBalance = (float) $salesBeforeSum - (float) $paymentsBeforeSum;
+
+        // Sales within date range
+        $salesInRange = (clone $salesQuery)
+            ->whereBetween('date', [$dateFrom, $dateTo])
+            ->orderBy('date', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        // Payments within date range (linked to client's sales)
+        $paymentsInRange = \App\Models\Payment::where('payable_type', \App\Models\Sale::class)
+            ->whereIn('payable_id', $allSaleIds)
+            ->whereBetween('date', [$dateFrom, $dateTo])
+            ->whereNull('deleted_at')
+            ->orderBy('date', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        // Build operations list
+        $operations = collect();
+
+        foreach ($salesInRange as $sale) {
+            $operations->push([
+                'type' => 'facture',
+                'code' => $sale->reference,
+                'date' => $sale->date,
+                'somme' => (float) $sale->grand_total,
+                'versement' => 0,
+            ]);
+        }
+
+        foreach ($paymentsInRange as $payment) {
+            $operations->push([
+                'type' => 'versement',
+                'code' => $payment->reference ?? ('PAY-' . $payment->id),
+                'date' => $payment->date,
+                'somme' => 0,
+                'versement' => (float) $payment->amount,
+            ]);
+        }
+
+        // Sort by date, then by type (facture before versement on same date)
+        $operations = $operations->sortBy([
+            ['date', 'asc'],
+            ['type', 'asc'], // 'facture' < 'versement' alphabetically, so asc puts facture first
+        ])->values();
+
+        // Calculate running balance
+        $runningBalance = $openingBalance;
+        $operations = $operations->map(function ($op) use (&$runningBalance) {
+            $runningBalance += $op['somme'] - $op['versement'];
+            $op['credit'] = round($runningBalance, 2);
+            return $op;
+        });
+
+        $totalSomme = $operations->sum('somme');
+        $totalVersement = $operations->sum('versement');
+
+        return [
+            'operations' => $operations->values()->all(),
+            'opening_balance' => round($openingBalance, 2),
+            'closing_balance' => round($runningBalance, 2),
+            'total_somme' => round($totalSomme, 2),
+            'total_versement' => round($totalVersement, 2),
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo,
+        ];
+    }
+
+    /**
+     * Get client statement data (JSON for preview)
+     */
+    public function getStatement(Request $request, Client $client)
+    {
+        $dateFrom = $request->input('date_from', now()->subYear()->format('Y-m-d'));
+        $dateTo = $request->input('date_to', now()->format('Y-m-d'));
+
+        $data = $this->buildStatementData($client, $dateFrom, $dateTo);
+
+        return response()->json($data);
+    }
+
+    /**
+     * Generate client statement PDF
+     */
+    public function generateStatementPdf(Request $request, Client $client)
+    {
+        $client->load(['warehouse:id,name', 'clientCategory:id,name']);
+
+        $dateFrom = $request->input('date_from', now()->subYear()->format('Y-m-d'));
+        $dateTo = $request->input('date_to', now()->format('Y-m-d'));
+
+        $includeSections = [
+            'include_info' => $request->input('include_info', 'true') === 'true',
+            'include_legal' => $request->input('include_legal', 'true') === 'true',
+        ];
+
+        $statementData = $this->buildStatementData($client, $dateFrom, $dateTo);
+        $settings = $this->getCompanySettings();
+
+        $pdf = Pdf::loadView('pdf.etat-client', [
+            'client' => $client,
+            'settings' => $settings,
+            'includeSections' => $includeSections,
+            'operations' => $statementData['operations'],
+            'openingBalance' => $statementData['opening_balance'],
+            'closingBalance' => $statementData['closing_balance'],
+            'totalSomme' => $statementData['total_somme'],
+            'totalVersement' => $statementData['total_versement'],
+            'dateFrom' => $dateFrom,
+            'dateTo' => $dateTo,
+        ]);
+        $pdf->setPaper('a4');
+
+        return $pdf->download("etat-client-{$client->id}.pdf");
+    }
+
+    private function getCompanySettings()
+    {
+        return [
+            'company_name' => Setting::get('company_name', ''),
+            'company_address' => Setting::get('company_address', ''),
+            'company_phone' => Setting::get('company_phone', ''),
+            'company_email' => Setting::get('company_email', ''),
+            'company_rc' => Setting::get('company_rc', ''),
+            'company_nif' => Setting::get('company_nif', ''),
+            'company_ai' => Setting::get('company_ai', ''),
+            'company_nis' => Setting::get('company_nis', ''),
+            'company_rib' => Setting::get('company_rib', ''),
+            'company_logo' => Setting::get('company_logo'),
+        ];
     }
 }

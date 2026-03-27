@@ -2,14 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use Illuminate\Support\Facades\DB;
 
 class StockTransfer extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes, GeneratesReference;
+
+    protected static string $referencePrefix = 'TRF';
 
     // Statuses: pending (order) → loading (chargement) → collected (start)
     const STATUS_PENDING = 'pending';
@@ -33,34 +35,6 @@ class StockTransfer extends Model
         'collected_at' => 'datetime',
         'approved_at' => 'datetime',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (!$model->reference) {
-                $model->reference = self::generateReference();
-            }
-        });
-    }
-
-    public static function generateReference()
-    {
-        $prefix = 'TRF';
-        $date = now()->format('Ymd');
-
-        // Use DB::table to bypass SoftDeletes and avoid race conditions
-        $last = DB::table('stock_transfers')
-            ->where('reference', 'like', $prefix . $date . '%')
-            ->orderByRaw('CAST(SUBSTRING(reference, -4) AS UNSIGNED) DESC')
-            ->lockForUpdate()
-            ->first();
-
-        $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
-
-        return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-    }
 
     public function fromWarehouse()
     {

@@ -164,8 +164,8 @@ use App\Helpers\ArabicHelper;
                     </div>
                     @endif
                     @endif
-                    <div class="company-name">{{ $settings['company_name'] ?? 'RAFIK BISKRA' }}</div>
-                    <div>{{ $settings['company_address'] ?? 'Biskra, Algerie' }}</div>
+                    <div class="company-name">{{ ArabicHelper::safe($settings['company_name'] ?? null, 'RAFIK BISKRA') }}</div>
+                    <div>{{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}</div>
                     <div>Tel: {{ $settings['company_phone'] ?? '' }}</div>
                     @if(!empty($settings['company_email']))
                     <div>Email: {{ $settings['company_email'] }}</div>
@@ -183,8 +183,8 @@ use App\Helpers\ArabicHelper;
             <td style="width: 50%; text-align: right; padding-left: 10px;">
                 <div style="font-size: 10px;">
                     <strong>Date de Commande:</strong> {{ $purchase->date ? \Carbon\Carbon::parse($purchase->date)->format('d/m/Y') : now()->format('d/m/Y') }}<br>
-                    <strong>Entrepot:</strong> {{ $purchase->warehouse->name ?? '-' }}<br>
-                    <strong>Demandeur:</strong> {{ $purchase->user->name ?? '-' }}
+                    <strong>Entrepot:</strong> {{ ArabicHelper::safe($purchase->warehouse->name ?? null, '-') }}<br>
+                    <strong>Demandeur:</strong> {{ ArabicHelper::safe($purchase->user->name ?? null, '-') }}
                 </div>
             </td>
         </tr>
@@ -267,24 +267,24 @@ use App\Helpers\ArabicHelper;
                 $piecesPerPkg = $product->pieces_per_package ?? ($unitBuy->operation_value ?? 1);
                 $qty = $item->quantity ?? 0;
                 $totalQty += $qty;
-                $itemTotalPieces = $qty * $piecesPerPkg;
+                $itemTotalPieces = $qty;
                 $totalPieces += $itemTotalPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                // Use stored subtotal (includes pieces_per_package in calculation)
-                $subtotal = $item->subtotal ?? (($unitPrice * $piecesPerPkg * $qty) - $itemDiscount);
+                // quantity is already in pieces, no need to multiply by pieces_per_package
+                $subtotal = $item->subtotal ?? (($unitPrice * $qty) - $itemDiscount);
                 $calculatedTotal += $subtotal;
             @endphp
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
                 <td class="text-left">{{ ArabicHelper::safe($productName, 'Produit') }}</td>
                 <td class="text-center" style="font-size: 12px; font-weight: bold; color: #065f46;">
-                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                    @if($piecesPerPkg > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                            $cartons = intval(floor($qty / $piecesPerPkg));
+                            $extraPieces = $qty % $piecesPerPkg;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        {{ $cartons }}@if($extraPieces > 0) + {{ $extraPieces }}ق@endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif
@@ -355,7 +355,7 @@ use App\Helpers\ArabicHelper;
     <div class="conditions-box">
         <h4>CONDITIONS DE LIVRAISON:</h4>
         <div>- Delai de livraison: A convenir</div>
-        <div>- Lieu de livraison: {{ $purchase->warehouse->name ?? 'Entrepot principal' }}</div>
+        <div>- Lieu de livraison: {{ ArabicHelper::safe($purchase->warehouse->name ?? null, 'Entrepot principal') }}</div>
         <div>- Mode de paiement: A la livraison / Cheque / Virement</div>
     </div>
 

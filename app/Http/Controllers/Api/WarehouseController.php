@@ -11,7 +11,7 @@ class WarehouseController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Warehouse::withCount('stock')->with('assignedUser:id,name,warehouse_id');
+        $query = Warehouse::withCount('stock')->with('assignedUser:id,name,role,warehouse_id');
 
         if ($request->active_only) {
             $query->active();

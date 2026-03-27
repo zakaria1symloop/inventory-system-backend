@@ -170,9 +170,9 @@ use App\Helpers\ArabicHelper;
                 </div>
                 @endif
                 @endif
-                <div class="company-name">{{ $settings['company_name'] ?? 'RAFIK BISKRA' }}</div>
+                <div class="company-name">{{ ArabicHelper::safe($settings['company_name'] ?? null, 'RAFIK BISKRA') }}</div>
                 <div class="company-details">
-                    <strong>Adresse:</strong> {{ $settings['company_address'] ?? 'Biskra, Algerie' }}<br>
+                    <strong>Adresse:</strong> {{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}<br>
                     <strong>Tel:</strong> {{ $settings['company_phone'] ?? '' }}
                     @if(!empty($settings['company_email']))
                     <br><strong>Email:</strong> {{ $settings['company_email'] }}
@@ -197,7 +197,7 @@ use App\Helpers\ArabicHelper;
                 <div style="font-size: 12px;">
                     <strong>Date:</strong> {{ $sale->date ? \Carbon\Carbon::parse($sale->date)->format('d/m/Y') : '-' }}<br>
                     <strong>Heure:</strong> {{ now()->format('H:i') }}<br>
-                    <strong>Entrepot:</strong> {{ $sale->warehouse->name ?? '-' }}
+                    <strong>Entrepot:</strong> {{ ArabicHelper::safe($sale->warehouse->name ?? null, '-') }}
                 </div>
             </td>
         </tr>
@@ -238,7 +238,7 @@ use App\Helpers\ArabicHelper;
                 <div class="info-box">
                     <h3>LIVRAISON</h3>
                     <div class="info-row"><span class="info-label">Ref Facture:</span> {{ $sale->reference ?? '-' }}</div>
-                    <div class="info-row"><span class="info-label">Vendeur:</span> {{ $sale->user->name ?? '-' }}</div>
+                    <div class="info-row"><span class="info-label">Vendeur:</span> {{ ArabicHelper::safe($sale->user->name ?? null, '-') }}</div>
                     <div class="info-row"><span class="info-label">Nb Articles:</span> {{ $sale->items ? $sale->items->count() : 0 }}</div>
                 </div>
             </td>
@@ -271,14 +271,13 @@ use App\Helpers\ArabicHelper;
                 $unitSale = $product->unitSale ?? null;
                 $unitName = $unitSale->short_name ?? 'U';
                 $piecesPerPkg = $product->pieces_per_package ?? 1;
-                $qty = $item->quantity ?? 0;
+                $qty = $item->quantity ?? 0; // Already in pieces
                 $totalQty += $qty;
-                $nbPieces = $qty * $piecesPerPkg;
+                $nbPieces = $qty;
                 $totalPieces += $nbPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                // Use stored subtotal (includes pieces_per_package)
-                $lineTotal = $item->subtotal ?? (($unitPrice * $piecesPerPkg * $qty) - $itemDiscount);
+                $lineTotal = $item->subtotal ?? (($unitPrice * $qty) - $itemDiscount);
                 $calculatedTotal += $lineTotal;
             @endphp
             <tr>
@@ -287,18 +286,22 @@ use App\Helpers\ArabicHelper;
                     <strong>{{ ArabicHelper::safe($productName, 'Produit') }}</strong>
                 </td>
                 <td class="qty-cell">
-                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                    @if($piecesPerPkg > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                            $cartons = intval(floor($qty / $piecesPerPkg));
+                            $extraPieces = $qty % $piecesPerPkg;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        @if($extraPieces > 0)
+                            {{ $cartons }} + {{ $extraPieces }}ق
+                        @else
+                            {{ $cartons }}
+                        @endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif
                 </td>
                 <td class="text-center">
-                    {{ $unitName }}
+                    {{ ArabicHelper::safe($unitName) }}
                     @if($piecesPerPkg > 1)
                     <br><span class="unit-info">({{ $piecesPerPkg }} pcs)</span>
                     @endif

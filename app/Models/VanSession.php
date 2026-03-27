@@ -2,13 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class VanSession extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes, GeneratesReference;
+
+    protected static string $referencePrefix = 'VAN';
 
     protected $fillable = [
         'reference',
@@ -39,27 +42,6 @@ class VanSession extends Model
         'total_returned_value' => 'decimal:2',
         'sales_count' => 'integer',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (!$model->reference) {
-                $model->reference = self::generateReference();
-            }
-        });
-    }
-
-    public static function generateReference()
-    {
-        $prefix = 'VAN';
-        $date = now()->format('Ymd');
-        $last = self::whereDate('created_at', today())->latest()->first();
-        $sequence = $last ? (int) substr($last->reference, -4) + 1 : 1;
-
-        return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-    }
 
     public function livreur()
     {

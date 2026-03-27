@@ -10,6 +10,8 @@ use App\Models\DeliveryOrder;
 use App\Models\DeliveryReturn;
 use App\Models\DeliveryStock;
 use App\Models\Order;
+use App\Models\Sale;
+use App\Models\SaleItem;
 use App\Models\Stock;
 use App\Models\StockMovement;
 use App\Models\User;
@@ -172,8 +174,13 @@ class DeliveryController extends Controller
                 ], 400);
             }
 
-            // Deduct stock from warehouse (products go OUT with livreur)
+            // Get livreur's warehouse (if assigned)
+            $livreur = $delivery->livreur;
+            $livreurWarehouseId = $livreur ? $livreur->warehouse_id : null;
+
+            // Move stock: deduct from main warehouse, add to livreur's warehouse
             foreach ($delivery->stock as $deliveryStock) {
+                // Deduct from main/source warehouse
                 StockMovement::record(
                     $deliveryStock->product_id,
                     $delivery->warehouse_id,
@@ -184,6 +191,20 @@ class DeliveryController extends Controller
                     null,
                     'خروج للتوصيل'
                 );
+
+                // Add to livreur's warehouse (if they have one)
+                if ($livreurWarehouseId && $livreurWarehouseId != $delivery->warehouse_id) {
+                    StockMovement::record(
+                        $deliveryStock->product_id,
+                        $livreurWarehouseId,
+                        $deliveryStock->quantity_loaded,
+                        StockMovement::TYPE_TRANSFER_IN,
+                        $delivery->reference,
+                        $delivery,
+                        null,
+                        'استلام بضاعة للتوصيل من ' . ($delivery->warehouse->name ?? '')
+                    );
+                }
             }
 
             $delivery->start();
@@ -219,21 +240,43 @@ class DeliveryController extends Controller
             'amount_collected' => 'nullable|numeric|min:0',
         ]);
 
+        // If collecting more than amount_due (debt collection), check permission
+        $amountCollected = $request->amount_collected ?? $deliveryOrder->amount_due;
+        if ($amountCollected > $deliveryOrder->amount_due && !auth()->user()->can_collect_debt) {
+            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة'], 403);
+        }
+
         DB::beginTransaction();
 
         try {
             $deliveryOrder->markDelivered();
 
             // Update money collected
-            $amountCollected = $request->amount_collected ?? $deliveryOrder->amount_due;
             $deliveryOrder->amount_collected = $amountCollected;
             $deliveryOrder->save();
 
-            // Track delivery in delivery_stock (stock already deducted when delivery started)
+            // Track delivery in delivery_stock and deduct from livreur's warehouse
+            $livreur = $delivery->livreur;
+            $livreurWarehouseId = $livreur ? $livreur->warehouse_id : null;
+
             foreach ($deliveryOrder->order->items as $item) {
                 $deliveryStock = $delivery->stock()->where('product_id', $item->product_id)->first();
                 if ($deliveryStock) {
                     $deliveryStock->recordDelivery($item->quantity_confirmed);
+                }
+
+                // Deduct delivered items from livreur's warehouse
+                if ($livreurWarehouseId) {
+                    StockMovement::record(
+                        $item->product_id,
+                        $livreurWarehouseId,
+                        $item->quantity_confirmed,
+                        StockMovement::TYPE_SALE,
+                        $delivery->reference,
+                        $delivery,
+                        null,
+                        'بيع عند التوصيل'
+                    );
                 }
             }
 
@@ -266,11 +309,14 @@ class DeliveryController extends Controller
                         $amountCollected,
                         'delivery',
                         $deliveryOrder->id,
-                        "Livraison commande #{$deliveryOrder->order_id}",
+                        "تحصيل توصيل طلب #{$deliveryOrder->order_id}",
                         auth()->id()
                     );
                 }
             }
+
+            // Auto-create sale record from delivered order
+            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected);
 
             DB::commit();
 
@@ -298,11 +344,17 @@ class DeliveryController extends Controller
         $request->validate([
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity_delivered' => 'required|numeric|min:0',
-            'items.*.quantity_returned' => 'nullable|numeric|min:0',
+            'items.*.quantity_delivered' => 'required|integer|min:0',
+            'items.*.quantity_returned' => 'nullable|integer|min:0',
             'items.*.return_reason' => 'nullable|in:refused,damaged,excess,store_closed,wrong,other',
             'amount_collected' => 'nullable|numeric|min:0',
         ]);
+
+        // If collecting more than what will be due (debt collection), check permission
+        $requestedAmount = $request->input('amount_collected');
+        if ($requestedAmount !== null && $requestedAmount !== '' && (float)$requestedAmount > $deliveryOrder->amount_due && !auth()->user()->can_collect_debt) {
+            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة'], 403);
+        }
 
         DB::beginTransaction();
 
@@ -312,6 +364,8 @@ class DeliveryController extends Controller
             // Calculate the new amount_due based on delivered items
             $newAmountDue = 0;
             $order = $deliveryOrder->order;
+            $livreur = $delivery->livreur;
+            $livreurWarehouseId = $livreur ? $livreur->warehouse_id : null;
 
             foreach ($request->items as $item) {
                 $orderItem = $order->items()->where('product_id', $item['product_id'])->first();
@@ -333,10 +387,24 @@ class DeliveryController extends Controller
                         $newAmountDue += $itemTotal;
                     }
 
-                    // Track delivery in delivery_stock (stock already deducted when delivery started)
+                    // Track delivery in delivery_stock
                     $deliveryStock = $delivery->stock()->where('product_id', $item['product_id'])->first();
                     if ($deliveryStock) {
                         $deliveryStock->recordDelivery($quantityDelivered);
+                    }
+
+                    // Deduct delivered items from livreur's warehouse
+                    if ($livreurWarehouseId && $quantityDelivered > 0) {
+                        StockMovement::record(
+                            $item['product_id'],
+                            $livreurWarehouseId,
+                            $quantityDelivered,
+                            StockMovement::TYPE_SALE,
+                            $delivery->reference,
+                            $delivery,
+                            null,
+                            'بيع عند التوصيل الجزئي'
+                        );
                     }
 
                     if (isset($item['quantity_returned']) && $item['quantity_returned'] > 0) {
@@ -358,6 +426,9 @@ class DeliveryController extends Controller
                         if ($deliveryStock) {
                             $deliveryStock->recordReturn($item['quantity_returned']);
                         }
+
+                        // Returned items stay in livreur's warehouse
+                        // They will be moved back to main warehouse when processReturns() is called
                     }
                 }
             }
@@ -406,11 +477,14 @@ class DeliveryController extends Controller
                         $amountCollected,
                         'delivery',
                         $deliveryOrder->id,
-                        "Livraison partielle commande #{$deliveryOrder->order_id}",
+                        "تحصيل توصيل جزئي طلب #{$deliveryOrder->order_id}",
                         auth()->id()
                     );
                 }
             }
+
+            // Auto-create sale record from partial delivery
+            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected);
 
             DB::commit();
 
@@ -445,6 +519,9 @@ class DeliveryController extends Controller
 
         $delivery->updateCounts();
 
+        $livreur = $delivery->livreur;
+        $livreurWarehouseId = $livreur ? $livreur->warehouse_id : null;
+
         foreach ($deliveryOrder->order->items as $item) {
             $product = $item->product;
 
@@ -464,6 +541,9 @@ class DeliveryController extends Controller
             if ($deliveryStock) {
                 $deliveryStock->recordReturn($item->quantity_confirmed);
             }
+
+            // Failed items stay in livreur's warehouse
+            // They will be moved back to main warehouse when processReturns() is called
         }
 
         return response()->json($deliveryOrder);
@@ -479,6 +559,53 @@ class DeliveryController extends Controller
         $delivery->updateCounts();
 
         return response()->json($deliveryOrder);
+    }
+
+    /**
+     * Create a sale record from a delivered/partial delivery order.
+     * This records the delivery as a sale in the sales table (no stock deduction, already handled by delivery).
+     */
+    private function createSaleFromDelivery(Delivery $delivery, DeliveryOrder $deliveryOrder, float $amountCollected)
+    {
+        $order = $deliveryOrder->order;
+        if (!$order) return;
+
+        $sale = Sale::create([
+            'client_id' => $deliveryOrder->client_id,
+            'warehouse_id' => $delivery->livreur->warehouse_id ?? $order->warehouse_id,
+            'user_id' => $delivery->livreur_id,
+            'date' => now(),
+            'discount' => $order->discount ?? 0,
+            'tax' => $order->tax ?? 0,
+            'shipping' => 0,
+            'status' => 'completed',
+            'source' => 'delivery',
+            'note' => "توصيل طلب #{$order->reference}",
+        ]);
+
+        // Create sale items from order items (only delivered quantities)
+        foreach ($order->items as $item) {
+            $qty = $item->quantity_delivered ?? $item->quantity_confirmed;
+            if ($qty <= 0) continue;
+
+            SaleItem::create([
+                'sale_id' => $sale->id,
+                'product_id' => $item->product_id,
+                'quantity' => $qty,
+                'unit_price' => $item->unit_price,
+                'cost_price' => $item->product->cost_price ?? 0,
+                'discount' => $item->discount ?? 0,
+                'tax' => 0,
+            ]);
+        }
+
+        $sale->calculateTotals();
+
+        // Set paid amount from what was collected
+        $sale->paid_amount = $amountCollected;
+        $sale->due_amount = max(0, $sale->grand_total - $amountCollected);
+        $sale->payment_status = $sale->calculatePaymentStatus();
+        $sale->save();
     }
 
     public function processReturns(Request $request, Delivery $delivery)
@@ -524,6 +651,33 @@ class DeliveryController extends Controller
             ->whereIn('status', ['preparing', 'in_progress'])
             ->with(['deliveryOrders.order.items.product', 'deliveryOrders.client', 'stock.product'])
             ->first();
+
+        // Calculate real debt for each client (same as web does)
+        if ($delivery) {
+            $clientIds = $delivery->deliveryOrders->pluck('client_id')->unique()->filter();
+
+            $salesDebts = Sale::select('client_id', DB::raw('SUM(due_amount) as total'))
+                ->whereIn('client_id', $clientIds)
+                ->where('status', 'completed')
+                ->where('due_amount', '>', 0)
+                ->groupBy('client_id')
+                ->pluck('total', 'client_id');
+
+            $deliveryDebts = DeliveryOrder::select('client_id', DB::raw('SUM(amount_due - amount_collected) as total'))
+                ->whereIn('client_id', $clientIds)
+                ->whereIn('status', ['delivered', 'partial'])
+                ->whereRaw('amount_due > amount_collected')
+                ->groupBy('client_id')
+                ->pluck('total', 'client_id');
+
+            foreach ($delivery->deliveryOrders as $do) {
+                if ($do->client) {
+                    $salesDebt = (float) ($salesDebts[$do->client_id] ?? 0);
+                    $deliveryDebt = (float) ($deliveryDebts[$do->client_id] ?? 0);
+                    $do->client->balance = $salesDebt + $deliveryDebt;
+                }
+            }
+        }
 
         return response()->json($delivery);
     }
@@ -587,6 +741,11 @@ class DeliveryController extends Controller
      */
     public function collectPayment(Request $request, Delivery $delivery, DeliveryOrder $deliveryOrder)
     {
+        // Check if user has permission to collect debt
+        if (!auth()->user()->can_collect_debt) {
+            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون'], 403);
+        }
+
         $request->validate([
             'amount' => 'required|numeric|min:0.01',
             'notes' => 'nullable|string',
@@ -615,6 +774,19 @@ class DeliveryController extends Controller
             if ($deliveryOrder->client_id) {
                 $client = $deliveryOrder->client;
                 $client->updateBalance($amount, 'subtract');
+            }
+
+            // Also update the corresponding Sale record
+            $sale = Sale::where('source', 'delivery')
+                ->where('note', 'like', "%#{$deliveryOrder->order_id}%")
+                ->where('client_id', $deliveryOrder->client_id)
+                ->first();
+
+            if ($sale) {
+                $sale->paid_amount += $amount;
+                $sale->due_amount = max(0, $sale->grand_total - $sale->paid_amount);
+                $sale->payment_status = $sale->calculatePaymentStatus();
+                $sale->save();
             }
 
             // Record caisse transaction
@@ -1088,7 +1260,7 @@ class DeliveryController extends Controller
             'warehouse_id' => 'required|exists:warehouses,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.source_type' => 'required|in:delivery,van_session,warehouse_stock',
             'items.*.source_id' => 'nullable|integer',
         ]);
@@ -1096,15 +1268,15 @@ class DeliveryController extends Controller
         $targetUser = User::findOrFail($userId);
         $targetWarehouse = Warehouse::findOrFail($request->warehouse_id);
 
-        // Helper to format qty as cartons+pieces for human-readable errors
-        $formatQty = function ($qty, $piecesPerPackage) {
+        // Helper to format qty (pieces) as cartons+pieces for human-readable errors
+        $formatQty = function ($pieces, $piecesPerPackage) {
             $ppp = $piecesPerPackage ?: 1;
-            if ($ppp <= 1) return "{$qty}";
-            $cartons = floor($qty);
-            $pieces = round(($qty - $cartons) * $ppp);
-            if ($cartons > 0 && $pieces > 0) return "{$cartons} كرتون {$pieces} قطعة";
+            if ($ppp <= 1) return "{$pieces}";
+            $cartons = intdiv((int) $pieces, $ppp);
+            $remainder = (int) $pieces % $ppp;
+            if ($cartons > 0 && $remainder > 0) return "{$cartons} كرتون {$remainder} قطعة";
             if ($cartons > 0) return "{$cartons} كرتون";
-            if ($pieces > 0) return "{$pieces} قطعة";
+            if ($remainder > 0) return "{$remainder} قطعة";
             return '0';
         };
 
@@ -1115,7 +1287,7 @@ class DeliveryController extends Controller
 
             foreach ($request->items as $item) {
                 $productId = $item['product_id'];
-                $quantity = (float) $item['quantity'];
+                $quantity = (int) $item['quantity'];
                 $sourceType = $item['source_type'];
                 $sourceId = $item['source_id'] ?? null;
                 $product = \App\Models\Product::find($productId);
@@ -1135,10 +1307,9 @@ class DeliveryController extends Controller
 
                     $remaining = $deliveryStock->quantity_loaded - $deliveryStock->quantity_delivered - $deliveryStock->quantity_returned;
 
-                    if ($quantity > $remaining + 0.0001) {
+                    if ($quantity > $remaining) {
                         throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتبقي ({$formatQty($remaining, $ppp)})");
                     }
-                    $quantity = min($quantity, $remaining);
 
                     // Create delivery return
                     DeliveryReturn::create([
@@ -1179,10 +1350,9 @@ class DeliveryController extends Controller
                     $sessionItem = $session->items()->where('product_id', $productId)->firstOrFail();
                     $available = $sessionItem->quantity_loaded - $sessionItem->quantity_sold - $sessionItem->quantity_returned;
 
-                    if ($quantity > $available + 0.0001) {
+                    if ($quantity > $available) {
                         throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتاح ({$formatQty($available, $ppp)})");
                     }
-                    $quantity = min($quantity, $available);
 
                     // Create van return
                     VanReturn::create([
@@ -1222,12 +1392,11 @@ class DeliveryController extends Controller
                         ->where('product_id', $productId)
                         ->first();
 
-                    $currentQty = $stock ? (float) $stock->quantity : 0;
+                    $currentQty = $stock ? (int) $stock->quantity : 0;
 
-                    if ($quantity > $currentQty + 0.0001) {
+                    if ($quantity > $currentQty) {
                         throw new \Exception("الكمية المدخلة لـ {$productName} ({$formatQty($quantity, $ppp)}) أكبر من المتوفر ({$formatQty($currentQty, $ppp)})");
                     }
-                    $quantity = min($quantity, $currentQty);
 
                     // Deduct from user's warehouse
                     StockMovement::record(

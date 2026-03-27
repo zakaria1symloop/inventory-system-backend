@@ -23,10 +23,10 @@ class OrderItem extends Model
     ];
 
     protected $casts = [
-        'quantity_ordered' => 'decimal:2',
-        'quantity_confirmed' => 'decimal:2',
-        'quantity_delivered' => 'decimal:2',
-        'quantity_returned' => 'decimal:2',
+        'quantity_ordered' => 'integer',
+        'quantity_confirmed' => 'integer',
+        'quantity_delivered' => 'integer',
+        'quantity_returned' => 'integer',
         'unit_price' => 'decimal:2',
         'discount' => 'decimal:2',
         'subtotal' => 'decimal:2',
@@ -36,19 +36,17 @@ class OrderItem extends Model
     {
         parent::boot();
 
-        // Subtotal = unit_price (per piece) × pieces_per_package × quantity - discount
+        // Subtotal = unit_price (per piece) × quantity_ordered (pieces) - discount
         static::creating(function ($model) {
             // Default quantity_confirmed to quantity_ordered if not set
             if ($model->quantity_confirmed === null) {
                 $model->quantity_confirmed = $model->quantity_ordered;
             }
-            $piecesPerPackage = $model->product->pieces_per_package ?? 1;
-            $model->subtotal = ($model->unit_price * $piecesPerPackage * $model->quantity_ordered) - $model->discount;
+            $model->subtotal = ($model->unit_price * $model->quantity_ordered) - $model->discount;
         });
 
         static::updating(function ($model) {
-            $piecesPerPackage = $model->product->pieces_per_package ?? 1;
-            $model->subtotal = ($model->unit_price * $piecesPerPackage * $model->quantity_ordered) - $model->discount;
+            $model->subtotal = ($model->unit_price * $model->quantity_ordered) - $model->discount;
         });
     }
 

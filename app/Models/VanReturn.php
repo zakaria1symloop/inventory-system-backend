@@ -21,7 +21,7 @@ class VanReturn extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
         'returnable_to_stock' => 'boolean',
         'processed' => 'boolean',
         'processed_at' => 'datetime',

@@ -18,7 +18,7 @@ class Stock extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
     ];
 
     public function product()
@@ -90,7 +90,7 @@ class Stock extends Model
     public function scopeLowStock($query)
     {
         return $query->whereHas('product', function ($q) {
-            $q->whereRaw('stock.quantity <= products.stock_alert');
+            $q->whereRaw('stock.quantity <= products.stock_alert * COALESCE(products.pieces_per_package, 1)');
         });
     }
 }

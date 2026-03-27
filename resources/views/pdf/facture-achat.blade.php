@@ -148,8 +148,8 @@ use App\Helpers\ArabicHelper;
                     </div>
                     @endif
                     @endif
-                    <div class="company-name">{{ $settings['company_name'] ?? 'RAFIK BISKRA' }}</div>
-                    <div>{{ $settings['company_address'] ?? 'Biskra, Algerie' }}</div>
+                    <div class="company-name">{{ ArabicHelper::safe($settings['company_name'] ?? null, 'RAFIK BISKRA') }}</div>
+                    <div>{{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}</div>
                     <div>Tel: {{ $settings['company_phone'] ?? '' }}</div>
                     @if(!empty($settings['company_email']))
                     <div>Email: {{ $settings['company_email'] }}</div>
@@ -167,8 +167,8 @@ use App\Helpers\ArabicHelper;
             <td style="width: 50%; text-align: right; padding-left: 10px;">
                 <div style="font-size: 10px;">
                     <strong>Date:</strong> {{ $purchase->date ? \Carbon\Carbon::parse($purchase->date)->format('d/m/Y') : '-' }}<br>
-                    <strong>Entrepot:</strong> {{ $purchase->warehouse->name ?? '-' }}<br>
-                    <strong>Recepteur:</strong> {{ $purchase->user->name ?? '-' }}
+                    <strong>Entrepot:</strong> {{ ArabicHelper::safe($purchase->warehouse->name ?? null, '-') }}<br>
+                    <strong>Recepteur:</strong> {{ ArabicHelper::safe($purchase->user->name ?? null, '-') }}
                 </div>
             </td>
         </tr>
@@ -237,19 +237,23 @@ use App\Helpers\ArabicHelper;
         <thead>
             <tr>
                 <th style="width: 4%;">N°</th>
-                <th style="width: 30%;">Designation</th>
-                <th style="width: 10%;">Qte</th>
-                <th style="width: 10%;">Unite</th>
-                <th style="width: 12%;">Nbre Pcs</th>
-                <th style="width: 14%;">P.U</th>
-                <th style="width: 16%;">Montant</th>
+                <th style="width: 20%;">Designation</th>
+                <th style="width: 7%;">Qte</th>
+                <th style="width: 7%;">Unite</th>
+                <th style="width: 8%;">Pcs</th>
+                <th style="width: 9%;">P.U</th>
+                <th style="width: 10%;">Montant HT</th>
+                <th style="width: 5%;">TVA%</th>
+                <th style="width: 9%;">TVA</th>
+                <th style="width: 11%;">Montant TTC</th>
             </tr>
         </thead>
         <tbody>
             @php
                 $totalQty = 0;
                 $totalPieces = 0;
-                $calculatedTotal = 0;
+                $totalHt = 0;
+                $totalTva = 0;
             @endphp
             @foreach($purchase->items ?? [] as $index => $item)
             @php
@@ -259,23 +263,27 @@ use App\Helpers\ArabicHelper;
                 $piecesPerPkg = $product->pieces_per_package ?? ($unitBuy->operation_value ?? 1);
                 $qty = $item->quantity ?? 0;
                 $totalQty += $qty;
-                $itemTotalPieces = $qty * $piecesPerPkg;
+                $itemTotalPieces = $qty;
                 $totalPieces += $itemTotalPieces;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                $subtotal = $item->subtotal ?? ($qty * $unitPrice - $itemDiscount);
-                $calculatedTotal += $subtotal;
+                // Montant HT = price * qty - discount (before tax)
+                $montantHt = ($unitPrice * $qty) - $itemDiscount;
+                $totalHt += $montantHt;
+                $productTaxPercent = $product->tax_percent ?? 0;
+                $lineTva = $montantHt * $productTaxPercent / 100;
+                $totalTva += $lineTva;
             @endphp
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
                 <td class="text-left">{{ ArabicHelper::safe($productName, 'Produit') }}</td>
                 <td class="text-center" style="font-size: 11px; font-weight: bold; color: #1a56db;">
-                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                    @if($piecesPerPkg > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                            $cartons = intval(floor($qty / $piecesPerPkg));
+                            $extraPieces = $qty % $piecesPerPkg;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        {{ $cartons }}@if($extraPieces > 0) + {{ $extraPieces }}ق@endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif
@@ -288,7 +296,10 @@ use App\Helpers\ArabicHelper;
                     <br><span style="font-size: 7px; color: #666;">({{ number_format($unitPrice * $piecesPerPkg, 2) }}/crt)</span>
                     @endif
                 </td>
-                <td class="text-right" style="font-weight: bold;">{{ number_format($subtotal, 2) }}</td>
+                <td class="text-right">{{ number_format($montantHt, 2) }}</td>
+                <td class="text-center">{{ $productTaxPercent > 0 ? number_format($productTaxPercent, 0) . '%' : '-' }}</td>
+                <td class="text-right">{{ $productTaxPercent > 0 ? number_format($lineTva, 2) : '-' }}</td>
+                <td class="text-right" style="font-weight: bold;">{{ number_format($montantHt + $lineTva, 2) }}</td>
             </tr>
             @endforeach
             <!-- Totals Row -->
@@ -299,24 +310,26 @@ use App\Helpers\ArabicHelper;
                 <td class="text-center">-</td>
                 <td class="text-center">{{ number_format($totalPieces, 2) }}</td>
                 <td class="text-center">-</td>
-                <td class="text-right">{{ number_format($calculatedTotal, 2) }}</td>
+                <td class="text-right">{{ number_format($totalHt, 2) }}</td>
+                <td class="text-center">-</td>
+                <td class="text-right">{{ $totalTva > 0 ? number_format($totalTva, 2) : '-' }}</td>
+                <td class="text-right">{{ number_format($totalHt + $totalTva, 2) }}</td>
             </tr>
         </tbody>
     </table>
 
     @php
-        $totalAmount = $purchase->total_amount ?? 0;
         $purchaseDiscount = $purchase->discount ?? 0;
-        $purchaseTax = $purchase->tax ?? 0;
         $purchaseShipping = $purchase->shipping ?? 0;
-        $grandTotal = $purchase->grand_total ?? ($totalAmount - $purchaseDiscount + $purchaseTax + $purchaseShipping);
+        $purchaseTimbre = $purchase->timbre ?? 0;
+        $grandTotal = $purchase->grand_total ?? ($totalHt + $totalTva - $purchaseDiscount + $purchaseShipping + $purchaseTimbre);
     @endphp
 
     <!-- Totals -->
     <table class="totals-box">
         <tr>
             <td style="text-align: left;"><strong>Total HT:</strong></td>
-            <td style="text-align: right;">{{ number_format($totalAmount, 2) }} DA</td>
+            <td style="text-align: right;">{{ number_format($totalHt, 2) }} DA</td>
         </tr>
         @if($purchaseDiscount > 0)
         <tr>
@@ -324,16 +337,20 @@ use App\Helpers\ArabicHelper;
             <td style="text-align: right; color: red;">- {{ number_format($purchaseDiscount, 2) }} DA</td>
         </tr>
         @endif
-        @if($purchaseTax > 0)
         <tr>
             <td style="text-align: left;">TVA:</td>
-            <td style="text-align: right;">{{ number_format($purchaseTax, 2) }} DA</td>
+            <td style="text-align: right;">{{ number_format($totalTva, 2) }} DA</td>
         </tr>
-        @endif
         @if($purchaseShipping > 0)
         <tr>
             <td style="text-align: left;">Transport:</td>
             <td style="text-align: right;">{{ number_format($purchaseShipping, 2) }} DA</td>
+        </tr>
+        @endif
+        @if($purchaseTimbre > 0)
+        <tr>
+            <td style="text-align: left;">Timbre:</td>
+            <td style="text-align: right;">{{ number_format($purchaseTimbre, 2) }} DA</td>
         </tr>
         @endif
         <tr class="grand-total">

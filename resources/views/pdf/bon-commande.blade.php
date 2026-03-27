@@ -182,8 +182,8 @@ use App\Helpers\ArabicHelper;
         </div>
         @endif
         @endif
-        <h1>{{ $settings['company_name'] ?? config('app.name', 'Rafik Biskra') }}</h1>
-        <p>{{ $settings['company_address'] ?? 'Biskra, Algerie' }}</p>
+        <h1>{{ ArabicHelper::safe($settings['company_name'] ?? null, config('app.name', 'Rafik Biskra')) }}</h1>
+        <p>{{ ArabicHelper::safe($settings['company_address'] ?? null, 'Biskra, Algerie') }}</p>
         <p>Tel: {{ $settings['company_phone'] ?? '' }}</p>
     </div>
 
@@ -215,8 +215,8 @@ use App\Helpers\ArabicHelper;
         </div>
         <div class="info-box" style="margin-left: 2%;">
             <h3>Information Commande</h3>
-            <p><span class="info-label">Entrepot:</span> {{ $order->warehouse->name ?? '-' }}</p>
-            <p><span class="info-label">Vendeur:</span> {{ $order->seller->name ?? '-' }}</p>
+            <p><span class="info-label">Entrepot:</span> {{ ArabicHelper::safe($order->warehouse->name ?? null, '-') }}</p>
+            <p><span class="info-label">Vendeur:</span> {{ ArabicHelper::safe($order->seller->name ?? null, '-') }}</p>
             @if($order->trip)
             <p><span class="info-label">Tournee:</span> {{ $order->trip->reference ?? '-' }}</p>
             @endif
@@ -246,8 +246,8 @@ use App\Helpers\ArabicHelper;
                 $qty = $item->quantity_confirmed ?? $item->quantity_ordered ?? 0;
                 $unitPrice = $item->unit_price ?? 0;
                 $itemDiscount = $item->discount ?? 0;
-                // Use stored subtotal (includes pieces_per_package in calculation)
-                $subtotal = $item->subtotal ?? (($unitPrice * $piecesPerPkg * $qty) - $itemDiscount);
+                // quantity is already in pieces, no need to multiply by pieces_per_package
+                $subtotal = $item->subtotal ?? (($unitPrice * $qty) - $itemDiscount);
             @endphp
             <tr>
                 <td class="text-center">{{ $index + 1 }}</td>
@@ -258,18 +258,18 @@ use App\Helpers\ArabicHelper;
                     @endif
                 </td>
                 <td class="text-center">
-                    {{ $unitShortName }}
+                    {{ ArabicHelper::safe($unitShortName) }}
                     @if($piecesPerPkg > 1)
                     <br><small style="color: #666;">({{ $piecesPerPkg }} pcs)</small>
                     @endif
                 </td>
                 <td class="text-center">
-                    @if($piecesPerPkg > 1 && $qty != floor($qty))
+                    @if($piecesPerPkg > 1)
                         @php
-                            $cartons = floor($qty);
-                            $extraPieces = round(($qty - $cartons) * $piecesPerPkg);
+                            $cartons = intval(floor($qty / $piecesPerPkg));
+                            $extraPieces = $qty % $piecesPerPkg;
                         @endphp
-                        {{ $cartons }} + {{ $extraPieces }}ق
+                        {{ $cartons }}@if($extraPieces > 0) + {{ $extraPieces }}ق@endif
                     @else
                         {{ number_format($qty, $qty == floor($qty) ? 0 : 2) }}
                     @endif

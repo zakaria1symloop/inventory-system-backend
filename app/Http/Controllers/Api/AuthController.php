@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -58,6 +59,21 @@ class AuthController extends Controller
             'phone' => 'nullable|string',
             'role' => 'in:seller,livreur,cashvan',
         ]);
+
+        // Check user limit
+        $tenant = $request->attributes->get('tenant');
+        if ($tenant && $tenant->user_limit) {
+            $currentCount = User::count();
+            if ($currentCount >= $tenant->user_limit) {
+                return response()->json([
+                    'message' => 'لقد وصلت للحد الأقصى من المستخدمين (' . $tenant->user_limit . '). قم بترقية خطتك لإضافة المزيد.',
+                    'limit' => $tenant->user_limit,
+                    'current' => $currentCount,
+                    'plan' => $tenant->plan,
+                    'extra_user_price' => Tenant::extraUserPrice()[$tenant->plan] ?? 0,
+                ], 403);
+            }
+        }
 
         $user = User::create([
             'name' => $request->name,

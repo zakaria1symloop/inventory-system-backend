@@ -19,9 +19,9 @@ class VanSessionItem extends Model
     ];
 
     protected $casts = [
-        'quantity_loaded' => 'decimal:2',
-        'quantity_sold' => 'decimal:2',
-        'quantity_returned' => 'decimal:2',
+        'quantity_loaded' => 'integer',
+        'quantity_sold' => 'integer',
+        'quantity_returned' => 'integer',
         'unit_cost' => 'decimal:2',
     ];
 
@@ -37,6 +37,6 @@ class VanSessionItem extends Model
 
     public function getAvailableQuantityAttribute()
     {
-        return round($this->quantity_loaded - $this->quantity_sold - $this->quantity_returned, 2);
+        return $this->quantity_loaded - $this->quantity_sold - $this->quantity_returned;
     }
 }

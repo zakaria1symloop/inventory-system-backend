@@ -16,7 +16,7 @@ class StockTransferItem extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
+        'quantity' => 'integer',
     ];
 
     public function stockTransfer()

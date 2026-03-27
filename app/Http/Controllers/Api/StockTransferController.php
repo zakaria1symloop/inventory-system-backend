@@ -8,6 +8,7 @@ use App\Models\StockTransferItem;
 use App\Models\Stock;
 use App\Models\StockMovement;
 use App\Models\Product;
+use App\Models\Warehouse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -18,7 +19,7 @@ class StockTransferController extends Controller
      */
     public function index(Request $request)
     {
-        $query = StockTransfer::with(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product']);
+        $query = StockTransfer::with(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'collector', 'approver', 'items.product']);
 
         if ($request->from_warehouse_id) {
             $query->where('from_warehouse_id', $request->from_warehouse_id);
@@ -30,6 +31,14 @@ class StockTransferController extends Controller
 
         if ($request->status) {
             $query->where('status', $request->status);
+        }
+
+        // Filter active (pending+loading) vs archived (collected)
+        if ($request->has('active') && $request->active) {
+            $query->whereIn('status', [StockTransfer::STATUS_PENDING, StockTransfer::STATUS_LOADING]);
+        }
+        if ($request->has('archived') && $request->archived) {
+            $query->where('status', StockTransfer::STATUS_COLLECTED);
         }
 
         if ($request->from_date) {
@@ -57,7 +66,7 @@ class StockTransferController extends Controller
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
         ]);
 
         DB::beginTransaction();
@@ -82,7 +91,7 @@ class StockTransferController extends Controller
             DB::commit();
 
             return response()->json(
-                $transfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'items.product']),
+                $transfer->load(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'items.product']),
                 201
             );
         } catch (\Exception $e) {
@@ -106,7 +115,7 @@ class StockTransferController extends Controller
             'notes' => 'nullable|string',
             'items' => 'sometimes|required|array|min:1',
             'items.*.product_id' => 'required_with:items|exists:products,id',
-            'items.*.quantity' => 'required_with:items|numeric|min:0.01',
+            'items.*.quantity' => 'required_with:items|integer|min:1',
         ]);
 
         if ($request->has('from_warehouse_id') && $request->has('to_warehouse_id')) {
@@ -134,7 +143,7 @@ class StockTransferController extends Controller
             DB::commit();
 
             return response()->json(
-                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'items.product'])
+                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'items.product'])
             );
         } catch (\Exception $e) {
             DB::rollBack();
@@ -148,7 +157,7 @@ class StockTransferController extends Controller
     public function show(StockTransfer $stockTransfer)
     {
         return response()->json(
-            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
+            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
         );
     }
 
@@ -190,7 +199,7 @@ class StockTransferController extends Controller
         $stockTransfer->save();
 
         return response()->json(
-            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'approver', 'items.product'])
+            $stockTransfer->load(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'approver', 'items.product'])
         );
     }
 
@@ -198,7 +207,7 @@ class StockTransferController extends Controller
      * Collect/Start - moves stock from source to destination warehouse
      * Status: loading → collected (driver can now sell)
      */
-    public function collect(StockTransfer $stockTransfer)
+    public function collect(Request $request, StockTransfer $stockTransfer)
     {
         if (!$stockTransfer->isLoading()) {
             if ($stockTransfer->isPending()) {
@@ -233,6 +242,7 @@ class StockTransferController extends Controller
             }
 
             // Move stock: deduct from source, add to destination
+            $totalCostValue = 0;
             foreach ($stockTransfer->items as $item) {
                 // Deduct from source warehouse
                 StockMovement::record(
@@ -257,6 +267,10 @@ class StockTransferController extends Controller
                     null,
                     'استلام تحويل من ' . ($stockTransfer->fromWarehouse->name ?? '')
                 );
+
+                // Calculate total cost value
+                $product = Product::find($item->product_id);
+                $totalCostValue += $item->quantity * ($product->cost_price ?? 0);
             }
 
             $stockTransfer->status = StockTransfer::STATUS_COLLECTED;
@@ -267,7 +281,7 @@ class StockTransferController extends Controller
             DB::commit();
 
             return response()->json(
-                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
+                $stockTransfer->load(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'collector', 'approver', 'items.product'])
             );
         } catch (\Exception $e) {
             DB::rollBack();
@@ -300,7 +314,7 @@ class StockTransferController extends Controller
             return response()->json([]);
         }
 
-        $transfers = StockTransfer::with(['fromWarehouse.assignedUser:id,name,warehouse_id', 'toWarehouse.assignedUser:id,name,warehouse_id', 'creator', 'approver', 'items.product'])
+        $transfers = StockTransfer::with(['fromWarehouse.assignedUser:id,name,role,warehouse_id', 'toWarehouse.assignedUser:id,name,role,warehouse_id', 'creator', 'approver', 'items.product'])
             ->where('to_warehouse_id', $user->warehouse_id)
             ->whereIn('status', [StockTransfer::STATUS_PENDING, StockTransfer::STATUS_LOADING])
             ->latest()
@@ -316,12 +330,17 @@ class StockTransferController extends Controller
     {
         $user = auth()->user();
 
-        if (!$user->warehouse_id) {
-            return response()->json([]);
+        $warehouseId = $user->warehouse_id;
+        if (!$warehouseId) {
+            // Fallback to main warehouse
+            $warehouseId = Warehouse::where('is_main', true)->value('id');
+            if (!$warehouseId) {
+                return response()->json([]);
+            }
         }
 
-        $stocks = Stock::with('product')
-            ->where('warehouse_id', $user->warehouse_id)
+        $stocks = Stock::with('product.categoryPrices')
+            ->where('warehouse_id', $warehouseId)
             ->where('quantity', '>', 0)
             ->get()
             ->map(function ($stock) {
@@ -342,12 +361,16 @@ class StockTransferController extends Controller
     {
         $user = auth()->user();
 
-        if (!$user->warehouse_id) {
-            return response()->json(['data' => []]);
+        $warehouseId = $user->warehouse_id;
+        if (!$warehouseId) {
+            $warehouseId = Warehouse::where('is_main', true)->value('id');
+            if (!$warehouseId) {
+                return response()->json(['data' => []]);
+            }
         }
 
         $query = \App\Models\Sale::with(['client', 'items.product', 'warehouse'])
-            ->where('warehouse_id', $user->warehouse_id)
+            ->where('warehouse_id', $warehouseId)
             ->where('user_id', $user->id);
 
         if ($request->from_date) {

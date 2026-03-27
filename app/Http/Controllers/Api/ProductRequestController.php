@@ -32,6 +32,15 @@ class ProductRequestController extends Controller
             $query->where('van_session_id', $request->van_session_id);
         }
 
+        // Filter by type: 'livreur' (has van_session_id) or 'cashvan' (no van_session_id)
+        if ($request->has('type')) {
+            if ($request->type === 'livreur') {
+                $query->whereNotNull('van_session_id');
+            } elseif ($request->type === 'cashvan') {
+                $query->whereNull('van_session_id');
+            }
+        }
+
         $perPage = $request->input('per_page', 20);
         return response()->json($query->paginate($perPage));
     }
@@ -78,7 +87,7 @@ class ProductRequestController extends Controller
             'warehouse_id' => 'required_without:van_session_id|exists:warehouses,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.notes' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
@@ -149,7 +158,7 @@ class ProductRequestController extends Controller
         $request->validate([
             'items' => 'sometimes|array',
             'items.*.id' => 'required_with:items|exists:product_request_items,id',
-            'items.*.quantity_approved' => 'required_with:items|numeric|min:0',
+            'items.*.quantity_approved' => 'required_with:items|integer|min:0',
             'admin_notes' => 'nullable|string',
         ]);
 
@@ -340,7 +349,7 @@ class ProductRequestController extends Controller
             'notes' => 'nullable|string',
             'items' => 'sometimes|array|min:1',
             'items.*.product_id' => 'required_with:items|exists:products,id',
-            'items.*.quantity' => 'required_with:items|numeric|min:0.01',
+            'items.*.quantity' => 'required_with:items|integer|min:1',
             'items.*.notes' => 'nullable|string',
         ]);
 

@@ -52,7 +52,7 @@ class VanSessionController extends Controller
             'date' => 'required|date',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'notes' => 'nullable|string',
         ]);
 
@@ -120,7 +120,7 @@ class VanSessionController extends Controller
             'date' => 'sometimes|date',
             'items' => 'sometimes|array|min:1',
             'items.*.product_id' => 'required_with:items|exists:products,id',
-            'items.*.quantity' => 'required_with:items|numeric|min:0.01',
+            'items.*.quantity' => 'required_with:items|integer|min:1',
             'notes' => 'nullable|string',
         ]);
 
@@ -321,7 +321,7 @@ class VanSessionController extends Controller
             'client_id' => 'nullable|exists:clients,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0',
             'discount' => 'nullable|numeric|min:0',
@@ -361,7 +361,7 @@ class VanSessionController extends Controller
             foreach ($request->items as $item) {
                 $product = Product::find($item['product_id']);
                 $itemDiscount = $item['discount'] ?? 0;
-                $subtotal = ($item['quantity'] * $item['unit_price'] * ($product->pieces_per_package ?? 1)) - $itemDiscount;
+                $subtotal = ($item['quantity'] * $item['unit_price']) - $itemDiscount;
 
                 VanSaleItem::create([
                     'van_sale_id' => $sale->id,
@@ -377,7 +377,7 @@ class VanSessionController extends Controller
                 // Update van session item
                 $sessionItem = $vanSession->items()->where('product_id', $item['product_id'])->first();
                 if ($sessionItem) {
-                    $sessionItem->quantity_sold = round($sessionItem->quantity_sold + $item['quantity'], 2);
+                    $sessionItem->quantity_sold = $sessionItem->quantity_sold + $item['quantity'];
                     $sessionItem->save();
                 }
             }
@@ -409,7 +409,7 @@ class VanSessionController extends Controller
                         $request->paid_amount,
                         'van_sale',
                         $sale->id,
-                        "Vente camion #{$sale->id}",
+                        "بيع متنقل #{$sale->id}",
                         auth()->id()
                     );
                 }
@@ -440,9 +440,9 @@ class VanSessionController extends Controller
                 'van_session_id' => $item->van_session_id,
                 'product_id' => $item->product_id,
                 'product' => $item->product,
-                'quantity_loaded' => round((float)$item->quantity_loaded, 2),
-                'quantity_sold' => round((float)$item->quantity_sold, 2),
-                'quantity_returned' => round((float)$item->quantity_returned, 2),
+                'quantity_loaded' => (int)$item->quantity_loaded,
+                'quantity_sold' => (int)$item->quantity_sold,
+                'quantity_returned' => (int)$item->quantity_returned,
                 'unit_price' => $item->product->retail_price ?? $item->unit_cost,
                 'unit_cost' => $item->unit_cost,
                 'pieces_per_package' => $item->product->pieces_per_package ?? 1,

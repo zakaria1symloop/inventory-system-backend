@@ -2,13 +2,16 @@
 
 namespace App\Models;
 
+use App\Traits\GeneratesReference;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Purchase extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes, GeneratesReference;
+
+    protected static string $referencePrefix = 'PUR';
 
     protected $fillable = [
         'reference',
@@ -20,6 +23,7 @@ class Purchase extends Model
         'discount',
         'tax',
         'shipping',
+        'timbre',
         'grand_total',
         'paid_amount',
         'due_amount',
@@ -34,31 +38,11 @@ class Purchase extends Model
         'discount' => 'decimal:2',
         'tax' => 'decimal:2',
         'shipping' => 'decimal:2',
+        'timbre' => 'decimal:2',
         'grand_total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
     ];
-
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (!$model->reference) {
-                $model->reference = self::generateReference();
-            }
-        });
-    }
-
-    public static function generateReference()
-    {
-        $prefix = 'PUR';
-        $date = now()->format('Ymd');
-        $lastPurchase = self::whereDate('created_at', today())->latest()->first();
-        $sequence = $lastPurchase ? (int) substr($lastPurchase->reference, -4) + 1 : 1;
-
-        return $prefix . $date . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-    }
 
     public function supplier()
     {
@@ -93,12 +77,10 @@ class Purchase extends Model
     public function calculateTotals()
     {
         // Calculate totals from items
-        // unit_price is price per 1 piece, multiply by pieces_per_package
+        // quantity is now in pieces, so subtotal = unit_price × quantity - discount + tax
         $totalAmount = 0;
-        foreach ($this->items()->with('product')->get() as $item) {
-            $piecesPerPackage = $item->product->pieces_per_package ?? 1;
-            // subtotal = unit_price × pieces_per_package × quantity - discount + tax
-            $subtotal = ($item->unit_price * $piecesPerPackage * $item->quantity) - $item->discount + $item->tax;
+        foreach ($this->items()->get() as $item) {
+            $subtotal = ($item->unit_price * $item->quantity) - $item->discount + $item->tax;
             if ($item->subtotal != $subtotal) {
                 $item->subtotal = $subtotal;
                 $item->save();
@@ -107,9 +89,18 @@ class Purchase extends Model
         }
 
         $this->total_amount = $totalAmount;
-        $this->grand_total = $this->total_amount - $this->discount + $this->tax + $this->shipping;
-        $this->due_amount = $this->grand_total - $this->paid_amount;
-        $this->payment_status = $this->calculatePaymentStatus();
+        $this->grand_total = $this->total_amount - $this->discount + $this->tax + $this->shipping + $this->timbre;
+
+        // Pending purchases have no real debt yet
+        if ($this->status === 'pending') {
+            $this->due_amount = 0;
+            $this->paid_amount = 0;
+            $this->payment_status = 'unpaid';
+        } else {
+            $this->due_amount = max(0, $this->grand_total - $this->paid_amount);
+            $this->payment_status = $this->calculatePaymentStatus();
+        }
+
         $this->save();
     }
 

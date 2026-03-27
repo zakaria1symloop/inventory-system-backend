@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 
 class Client extends Model
 {
@@ -12,6 +13,7 @@ class Client extends Model
 
     protected $fillable = [
         'name',
+        'code',
         'phone',
         'email',
         'address',
@@ -39,6 +41,35 @@ class Client extends Model
         'balance' => 'decimal:2',
         'is_active' => 'boolean',
     ];
+
+    protected static function boot()
+    {
+        parent::boot();
+
+        static::creating(function ($model) {
+            if (empty($model->code)) {
+                $model->code = static::generateCode();
+            }
+        });
+    }
+
+    public static function generateCode(): string
+    {
+        $prefix = 'CLT';
+        $separator = '-';
+        $date = now()->format('Ymd');
+        $pattern = $prefix . $separator . $date . $separator;
+
+        $last = DB::table('clients')
+            ->where('code', 'like', $pattern . '%')
+            ->orderByRaw('CAST(SUBSTRING(code, -4) AS UNSIGNED) DESC')
+            ->lockForUpdate()
+            ->first();
+
+        $sequence = $last ? (int) substr($last->code, -4) + 1 : 1;
+
+        return $pattern . str_pad($sequence, 4, '0', STR_PAD_LEFT);
+    }
 
     public function creator()
     {

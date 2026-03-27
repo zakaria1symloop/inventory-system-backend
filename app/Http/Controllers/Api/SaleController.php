@@ -66,12 +66,13 @@ class SaleController extends Controller
             'discount' => 'nullable|numeric|min:0',
             'tax' => 'nullable|numeric|min:0',
             'shipping' => 'nullable|numeric|min:0',
+            'timbre' => 'nullable|numeric|min:0',
             'note' => 'nullable|string',
             'paid_amount' => 'nullable|numeric|min:0',
             'status' => 'nullable|in:completed,draft',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0',
             'items.*.tax' => 'nullable|numeric|min:0',
@@ -87,11 +88,24 @@ class SaleController extends Controller
                 foreach ($request->items as $item) {
                     $product = \App\Models\Product::find($item['product_id']);
                     $productName = $product ? $product->name : 'غير معروف';
+                    $ppp = $product ? ($product->pieces_per_package ?? 1) : 1;
 
                     $availableQty = Stock::getAvailableStock($item['product_id'], $request->warehouse_id);
 
+                    // Stock might be in cartons (old data) or pieces (new data)
+                    // If available < requested but available * ppp >= requested, stock is in cartons
+                    if ($availableQty < $item['quantity'] && $ppp > 1 && ($availableQty * $ppp) >= $item['quantity']) {
+                        // Stock is in cartons, convert to pieces first
+                        $this->convertStockToPieces($item['product_id'], $request->warehouse_id, $ppp);
+                        $availableQty = Stock::getAvailableStock($item['product_id'], $request->warehouse_id);
+                    }
+
                     if ($availableQty < $item['quantity']) {
-                        throw new \Exception("الكمية غير متوفرة للمنتج: {$productName}. المتوفر: {$availableQty}، المطلوب: {$item['quantity']}");
+                        $piecesAvail = $availableQty;
+                        $cartonsAvail = $ppp > 1 ? floor($piecesAvail / $ppp) : $piecesAvail;
+                        $extraAvail = $ppp > 1 ? $piecesAvail % $ppp : 0;
+                        $availDisplay = $ppp > 1 ? "{$cartonsAvail} كرتون" . ($extraAvail > 0 ? " + {$extraAvail} قطعة" : "") . " ({$piecesAvail} قطعة)" : "{$piecesAvail}";
+                        throw new \Exception("الكمية غير متوفرة للمنتج: {$productName}. المتوفر: {$availDisplay}، المطلوب: {$item['quantity']} قطعة");
                     }
                 }
             }
@@ -108,6 +122,7 @@ class SaleController extends Controller
                 'discount' => $request->discount ?? 0,
                 'tax' => $request->tax ?? 0,
                 'shipping' => $request->shipping ?? 0,
+                'timbre' => $request->timbre ?? 0,
                 'note' => $request->note,
                 'status' => $isDraft ? 'draft' : 'completed',
                 'source' => $source,
@@ -141,9 +156,10 @@ class SaleController extends Controller
 
             $sale->calculateTotals();
 
+            $paidAmount = $request->paid_amount ?? 0;
+
             // Only handle payments for non-draft sales
             if (!$isDraft) {
-                $paidAmount = $request->paid_amount ?? 0;
 
                 if ($request->client_id) {
                     $client = $sale->client;
@@ -227,17 +243,12 @@ class SaleController extends Controller
                         }
                     }
                 } else {
-                    if ($paidAmount > 0 && $paidAmount <= $sale->grand_total) {
-                        $sale->paid_amount = $paidAmount;
-                        $sale->due_amount = $sale->grand_total - $paidAmount;
-
-                        if ($sale->due_amount <= 0) {
-                            $sale->payment_status = 'paid';
-                            $sale->due_amount = 0;
-                        } else {
-                            $sale->payment_status = 'partial';
-                        }
-
+                    // No client - cap payment at grand_total
+                    if ($paidAmount > 0) {
+                        $appliedAmount = min($paidAmount, $sale->grand_total);
+                        $sale->paid_amount = $appliedAmount;
+                        $sale->due_amount = max(0, $sale->grand_total - $appliedAmount);
+                        $sale->payment_status = $sale->due_amount <= 0 ? 'paid' : 'partial';
                         $sale->save();
                     }
                 }
@@ -277,11 +288,18 @@ class SaleController extends Controller
             return response()->json(['message' => 'يمكن تأكيد المسودات فقط'], 400);
         }
 
+        $request->validate([
+            'paid_amount' => 'nullable|numeric|min:0',
+        ]);
+
         DB::beginTransaction();
 
         try {
+            // Load items once for both validation and stock deduction
+            $items = $sale->items()->with('product')->get();
+
             // Validate stock availability
-            foreach ($sale->items()->with('product')->get() as $item) {
+            foreach ($items as $item) {
                 $productName = $item->product ? $item->product->name : 'غير معروف';
                 $availableQty = Stock::getAvailableStock($item->product_id, $sale->warehouse_id);
 
@@ -291,7 +309,7 @@ class SaleController extends Controller
             }
 
             // Deduct stock for each item
-            foreach ($sale->items()->with('product')->get() as $item) {
+            foreach ($items as $item) {
                 StockMovement::record(
                     $item->product_id,
                     $sale->warehouse_id,
@@ -307,7 +325,7 @@ class SaleController extends Controller
             $sale->save();
 
             // Handle payment
-            $paidAmount = $request->paid_amount ?? $sale->paid_amount ?? 0;
+            $paidAmount = $request->paid_amount ?? 0;
 
             if ($sale->client_id) {
                 $client = $sale->client;
@@ -315,6 +333,7 @@ class SaleController extends Controller
 
                 if ($paidAmount > 0) {
                     $appliedToSale = min($paidAmount, $sale->grand_total);
+                    $appliedToPreviousDebt = max(0, $paidAmount - $sale->grand_total);
 
                     if ($appliedToSale > 0) {
                         $sale->payments()->create([
@@ -322,43 +341,86 @@ class SaleController extends Controller
                             'amount' => $appliedToSale,
                             'payment_method' => 'cash',
                             'date' => $sale->date,
-                            'notes' => 'دفعة عند البيع',
+                            'notes' => 'دفعة عند تأكيد البيع',
                             'user_id' => auth()->id(),
                         ]);
 
                         $sale->paid_amount = $appliedToSale;
-                        $sale->due_amount = $sale->grand_total - $appliedToSale;
-
-                        if ($sale->due_amount <= 0) {
-                            $sale->payment_status = 'paid';
-                            $sale->due_amount = 0;
-                        } else {
-                            $sale->payment_status = 'partial';
-                        }
-
+                        $sale->due_amount = max(0, $sale->grand_total - $appliedToSale);
+                        $sale->payment_status = $sale->due_amount <= 0 ? 'paid' : 'partial';
                         $sale->save();
                         $client->updateBalance($appliedToSale, 'subtract');
                     }
+
+                    // Apply excess to previous unpaid sales (FIFO)
+                    if ($appliedToPreviousDebt > 0) {
+                        $remainingExtra = $appliedToPreviousDebt;
+
+                        $unpaidSales = Sale::where('client_id', $client->id)
+                            ->where('id', '!=', $sale->id)
+                            ->where('status', 'completed')
+                            ->where('due_amount', '>', 0)
+                            ->orderBy('date', 'asc')
+                            ->orderBy('id', 'asc')
+                            ->get();
+
+                        foreach ($unpaidSales as $oldSale) {
+                            if ($remainingExtra <= 0) break;
+
+                            $applyToThis = min($remainingExtra, $oldSale->due_amount);
+
+                            $oldSale->payments()->create([
+                                'reference' => 'PAY-' . strtoupper(uniqid()),
+                                'amount' => $applyToThis,
+                                'payment_method' => 'cash',
+                                'date' => $sale->date,
+                                'notes' => 'تسديد من فاتورة ' . $sale->reference,
+                                'user_id' => auth()->id(),
+                            ]);
+
+                            $oldSale->paid_amount += $applyToThis;
+                            $oldSale->due_amount = max(0, $oldSale->due_amount - $applyToThis);
+                            $oldSale->payment_status = $oldSale->due_amount <= 0 ? 'paid' : 'partial';
+                            $oldSale->save();
+
+                            $client->updateBalance($applyToThis, 'subtract');
+                            $remainingExtra -= $applyToThis;
+                        }
+
+                        if ($remainingExtra > 0) {
+                            $client->updateBalance($remainingExtra, 'subtract');
+                        }
+                    }
                 }
             } else {
-                if ($paidAmount > 0 && $paidAmount <= $sale->grand_total) {
-                    $sale->paid_amount = $paidAmount;
-                    $sale->due_amount = $sale->grand_total - $paidAmount;
-
-                    if ($sale->due_amount <= 0) {
-                        $sale->payment_status = 'paid';
-                        $sale->due_amount = 0;
-                    } else {
-                        $sale->payment_status = 'partial';
-                    }
-
+                // No client - cap payment at grand_total
+                if ($paidAmount > 0) {
+                    $appliedAmount = min($paidAmount, $sale->grand_total);
+                    $sale->paid_amount = $appliedAmount;
+                    $sale->due_amount = max(0, $sale->grand_total - $appliedAmount);
+                    $sale->payment_status = $sale->due_amount <= 0 ? 'paid' : 'partial';
                     $sale->save();
+                }
+            }
+
+            // Record caisse transaction
+            if ($paidAmount > 0) {
+                $caisse = Caisse::where('user_id', auth()->id())->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'in',
+                        $paidAmount,
+                        Sale::class,
+                        $sale->id,
+                        'تحصيل من فاتورة ' . $sale->reference,
+                        auth()->id()
+                    );
                 }
             }
 
             DB::commit();
 
-            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
+            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product', 'payments']));
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json(['message' => $e->getMessage()], 500);
@@ -381,17 +443,18 @@ class SaleController extends Controller
                 'discount' => 'nullable|numeric|min:0',
                 'tax' => 'nullable|numeric|min:0',
                 'shipping' => 'nullable|numeric|min:0',
+                'timbre' => 'nullable|numeric|min:0',
                 'note' => 'nullable|string',
                 'paid_amount' => 'nullable|numeric|min:0',
                 'items' => 'nullable|array|min:1',
                 'items.*.product_id' => 'required|exists:products,id',
-                'items.*.quantity' => 'required|numeric|min:0.01',
+                'items.*.quantity' => 'required|integer|min:1',
                 'items.*.unit_price' => 'required|numeric|min:0',
                 'items.*.discount' => 'nullable|numeric|min:0',
                 'items.*.tax' => 'nullable|numeric|min:0',
             ]);
 
-            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'note', 'paid_amount']));
+            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'note']));
 
             // If items are provided, replace them
             if ($request->has('items')) {
@@ -421,11 +484,21 @@ class SaleController extends Controller
             'discount' => 'nullable|numeric|min:0',
             'tax' => 'nullable|numeric|min:0',
             'shipping' => 'nullable|numeric|min:0',
+            'timbre' => 'nullable|numeric|min:0',
             'note' => 'nullable|string',
         ]);
 
-        $sale->update($request->only(['discount', 'tax', 'shipping', 'note']));
+        $oldGrandTotal = $sale->grand_total;
+
+        $sale->update($request->only(['discount', 'tax', 'shipping', 'timbre', 'note']));
         $sale->calculateTotals();
+        $sale->refresh();
+
+        // Adjust client balance if grand_total changed
+        $totalDiff = $sale->grand_total - $oldGrandTotal;
+        if ($totalDiff != 0 && $sale->client_id) {
+            $sale->client->updateBalance(abs($totalDiff), $totalDiff > 0 ? 'add' : 'subtract');
+        }
 
         return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
     }
@@ -503,10 +576,15 @@ class SaleController extends Controller
 
     public function createReturn(Request $request, Sale $sale)
     {
+        // Only completed sales can have returns
+        if ($sale->status !== 'completed') {
+            return response()->json(['message' => 'لا يمكن إرجاع فاتورة غير مكتملة'], 400);
+        }
+
         $request->validate([
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.reason' => 'nullable|string',
             'note' => 'nullable|string',
         ]);
@@ -530,6 +608,16 @@ class SaleController extends Controller
                     throw new \Exception('المنتج غير موجود في المبيعات');
                 }
 
+                // Validate return quantity doesn't exceed sold quantity minus already returned
+                $alreadyReturned = SaleReturnItem::whereHas('saleReturn', function ($q) use ($sale) {
+                    $q->where('sale_id', $sale->id);
+                })->where('product_id', $item['product_id'])->sum('quantity');
+
+                $maxReturnable = $saleItem->quantity - $alreadyReturned;
+                if ($item['quantity'] > $maxReturnable) {
+                    throw new \Exception("الكمية المرتجعة ({$item['quantity']}) أكبر من المتاح للإرجاع ({$maxReturnable})");
+                }
+
                 SaleReturnItem::create([
                     'sale_return_id' => $return->id,
                     'product_id' => $item['product_id'],
@@ -538,7 +626,7 @@ class SaleController extends Controller
                     'reason' => $item['reason'] ?? null,
                 ]);
 
-                // Record stock movement
+                // Record stock movement (return to warehouse)
                 StockMovement::record(
                     $item['product_id'],
                     $sale->warehouse_id,
@@ -555,6 +643,26 @@ class SaleController extends Controller
 
             if ($sale->client_id) {
                 $sale->client->updateBalance($return->total_amount, 'subtract');
+            }
+
+            // Adjust the sale's due_amount
+            $sale->due_amount = max(0, $sale->due_amount - $return->total_amount);
+            $sale->payment_status = $sale->calculatePaymentStatus();
+            $sale->save();
+
+            // Record caisse transaction (money going OUT — refund to client)
+            if ($return->total_amount > 0) {
+                $caisse = Caisse::where('user_id', auth()->id())->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'out',
+                        $return->total_amount,
+                        \App\Models\SaleReturn::class,
+                        $return->id,
+                        'مرتجع بيع - فاتورة ' . $sale->reference,
+                        auth()->id()
+                    );
+                }
             }
 
             DB::commit();
@@ -639,5 +747,35 @@ class SaleController extends Controller
         $pdf->setPaper('a4');
 
         return $pdf->stream("bon-livraison-{$sale->reference}.pdf");
+    }
+
+    /**
+     * Convert stock from cartons to pieces for legacy data.
+     * If stock was stored as cartons (old purchases), multiply by pieces_per_package.
+     */
+    private function convertStockToPieces($productId, $warehouseId, $ppp)
+    {
+        $stock = Stock::where('product_id', $productId)
+            ->where('warehouse_id', $warehouseId)
+            ->first();
+
+        if ($stock && $ppp > 1) {
+            $oldQty = $stock->quantity;
+            $newQty = $oldQty * $ppp;
+            $stock->quantity = $newQty;
+            $stock->save();
+
+            // Record an adjustment movement for the conversion
+            StockMovement::record(
+                $productId,
+                $warehouseId,
+                $newQty - $oldQty,
+                StockMovement::TYPE_ADJUSTMENT,
+                'CONV-' . now()->format('YmdHis'),
+                null,
+                null,
+                "تحويل المخزون من كراتين إلى قطع ({$oldQty} كرتون × {$ppp} = {$newQty} قطعة)"
+            );
+        }
     }
 }
