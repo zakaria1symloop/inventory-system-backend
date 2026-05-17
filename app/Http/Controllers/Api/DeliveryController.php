@@ -606,6 +606,10 @@ class DeliveryController extends Controller
         $sale->due_amount = max(0, $sale->grand_total - $amountCollected);
         $sale->payment_status = $sale->calculatePaymentStatus();
         $sale->save();
+
+        // Link the delivery order to the created sale to prevent debt double-counting
+        $deliveryOrder->sale_id = $sale->id;
+        $deliveryOrder->save();
     }
 
     public function processReturns(Request $request, Delivery $delivery)
@@ -667,6 +671,7 @@ class DeliveryController extends Controller
                 ->whereIn('client_id', $clientIds)
                 ->whereIn('status', ['delivered', 'partial'])
                 ->whereRaw('amount_due > amount_collected')
+                ->whereNull('sale_id')
                 ->groupBy('client_id')
                 ->pluck('total', 'client_id');
 
@@ -829,6 +834,7 @@ class DeliveryController extends Controller
             )
             ->whereIn('status', ['delivered', 'partial'])
             ->whereRaw('amount_due > amount_collected')
+            ->whereNull('sale_id')
             ->groupBy('client_id')
             ->having('total_remaining', '>', 0);
 
@@ -872,6 +878,7 @@ class DeliveryController extends Controller
             ->where('client_id', $clientId)
             ->whereIn('status', ['delivered', 'partial'])
             ->whereRaw('amount_due > amount_collected')
+            ->whereNull('sale_id')
             ->orderByDesc('delivered_at')
             ->get()
             ->map(function ($order) {
@@ -1175,7 +1182,7 @@ class DeliveryController extends Controller
 
         $salesDebtors = $salesQuery->groupBy('client_id')->get();
 
-        // 2. Get clients with unpaid DELIVERIES
+        // 2. Get clients with unpaid DELIVERIES (exclude orders linked to a sale to prevent double-count)
         $deliveryDebtors = DeliveryOrder::select(
                 'client_id',
                 DB::raw('SUM(amount_due) as delivery_total_due'),
@@ -1185,6 +1192,7 @@ class DeliveryController extends Controller
             )
             ->whereIn('status', ['delivered', 'partial'])
             ->whereRaw('amount_due > amount_collected')
+            ->whereNull('sale_id')
             ->groupBy('client_id')
             ->having('delivery_total_remaining', '>', 0)
             ->get();
@@ -1466,11 +1474,12 @@ class DeliveryController extends Controller
                 ];
             });
 
-        // Get unpaid deliveries
+        // Get unpaid deliveries (exclude orders linked to a sale)
         $deliveries = DeliveryOrder::with(['delivery.livreur', 'order'])
             ->where('client_id', $clientId)
             ->whereIn('status', ['delivered', 'partial'])
             ->whereRaw('amount_due > amount_collected')
+            ->whereNull('sale_id')
             ->orderByDesc('delivered_at')
             ->get()
             ->map(function ($order) {

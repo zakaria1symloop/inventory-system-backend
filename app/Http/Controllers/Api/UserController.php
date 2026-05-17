@@ -48,32 +48,29 @@ class UserController extends Controller
         return response()->json($users);
     }
 
+    private const FREE_EMAIL_PROVIDERS = [
+        'gmail.com', 'yahoo.com', 'yahoo.fr', 'hotmail.com', 'hotmail.fr',
+        'outlook.com', 'outlook.fr', 'live.com', 'live.fr', 'aol.com',
+        'icloud.com', 'me.com', 'mail.com', 'protonmail.com', 'proton.me',
+        'gmx.com', 'gmx.fr', 'yandex.com', 'yandex.ru', 'zoho.com',
+    ];
+
     public function store(Request $request)
     {
-        $tenant = $request->attributes->get('tenant');
-        $tenantName = $tenant ? $tenant->name : '';
-
-        // Non-admin roles: email must be username@companyname.com
-        $emailRules = ['required', 'unique:users'];
-        if ($request->role && $request->role !== 'admin' && $tenantName) {
-            $suffix = '@' . $tenantName . '.com';
-            $emailRules[] = 'string';
-            $emailRules[] = 'regex:/^[a-zA-Z0-9._-]+' . preg_quote($suffix, '/') . '$/u';
-        } else {
-            $emailRules[] = 'email';
-        }
-
         $request->validate([
             'name' => 'required|string|max:255',
-            'email' => $emailRules,
+            'email' => ['required', 'email', 'unique:users', function ($attr, $value, $fail) {
+                $domain = strtolower(substr(strrchr($value, '@'), 1));
+                if (in_array($domain, self::FREE_EMAIL_PROVIDERS, true)) {
+                    $fail('البريد الإلكتروني يجب أن يكون بريد عمل (لا يقبل Gmail / Yahoo / Hotmail …)');
+                }
+            }],
             'password' => 'required|min:6',
             'phone' => 'nullable|string',
             'role' => 'required|in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'create_warehouse' => 'nullable|boolean',
-        ], [
-            'email.regex' => 'البريد الإلكتروني يجب أن ينتهي بـ @' . $tenantName . '.com',
         ]);
 
         // Check user limit
@@ -149,30 +146,19 @@ class UserController extends Controller
 
     public function update(Request $request, User $user)
     {
-        $tenant = $request->attributes->get('tenant');
-        $tenantName = $tenant ? $tenant->name : '';
-        $role = $request->role ?? $user->role;
-
-        // Non-admin roles: email must be username@companyname.com
-        $emailRules = ['unique:users,email,' . $user->id];
-        if ($role !== 'admin' && $tenantName) {
-            $suffix = '@' . $tenantName . '.com';
-            $emailRules[] = 'string';
-            $emailRules[] = 'regex:/^[a-zA-Z0-9._-]+' . preg_quote($suffix, '/') . '$/u';
-        } else {
-            $emailRules[] = 'email';
-        }
-
         $request->validate([
             'name' => 'string|max:255',
-            'email' => $emailRules,
+            'email' => ['email', 'unique:users,email,' . $user->id, function ($attr, $value, $fail) {
+                $domain = strtolower(substr(strrchr($value, '@'), 1));
+                if (in_array($domain, self::FREE_EMAIL_PROVIDERS, true)) {
+                    $fail('البريد الإلكتروني يجب أن يكون بريد عمل (لا يقبل Gmail / Yahoo / Hotmail …)');
+                }
+            }],
             'phone' => 'nullable|string',
             'role' => 'in:admin,manager,seller,livreur,cashvan',
             'is_active' => 'boolean',
             'can_collect_debt' => 'boolean',
             'warehouse_id' => 'nullable|exists:warehouses,id',
-        ], [
-            'email.regex' => 'البريد الإلكتروني يجب أن ينتهي بـ @' . $tenantName . '.com',
         ]);
 
         // Validate one warehouse per user
@@ -275,6 +261,17 @@ class UserController extends Controller
         }
 
         $user->update(['can_collect_debt' => !$user->can_collect_debt]);
+
+        return response()->json($user);
+    }
+
+    public function toggleSellFromMainStock(User $user)
+    {
+        if ($user->role !== 'cashvan') {
+            return response()->json(['message' => 'هذا الخيار متاح فقط لسائقي الكاشفان'], 400);
+        }
+
+        $user->update(['sell_from_main_stock' => !$user->sell_from_main_stock]);
 
         return response()->json($user);
     }

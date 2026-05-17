@@ -220,6 +220,7 @@ Route::middleware(['tenant', 'auth:sanctum', \Illuminate\Routing\Middleware\Subs
         Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword']);
         Route::post('/users/{user}/toggle-active', [UserController::class, 'toggleActive']);
         Route::post('/users/{user}/toggle-collect-debt', [UserController::class, 'toggleCollectDebt']);
+        Route::post('/users/{user}/toggle-sell-from-main-stock', [UserController::class, 'toggleSellFromMainStock']);
     });
     Route::get('/sellers', [UserController::class, 'getSellers']);
     Route::get('/livreurs', [UserController::class, 'getLivreurs']);
@@ -530,6 +531,7 @@ Route::middleware(['tenant', 'auth:sanctum', \Illuminate\Routing\Middleware\Subs
     Route::middleware('check.feature:caisses')->group(function () {
         Route::get('/caisses/my', [CaisseController::class, 'myCaisse']);
         Route::get('/caisses/summary', [CaisseController::class, 'summary']);
+        Route::get('/caisses/summary-period', [CaisseController::class, 'periodSummary']);
         Route::post('/caisses/transfer', [CaisseController::class, 'transfer']);
         Route::get('/caisses/{id}/transactions', [CaisseController::class, 'transactions']);
         Route::post('/caisses/{id}/settle', [CaisseController::class, 'settle']);

@@ -111,9 +111,10 @@ class SupplierController extends Controller
             ->having('total_remaining', '>', 0);
 
         $creditors = $query->get()->map(function ($item) {
-            $supplier = Supplier::find($item->supplier_id);
+            $supplier = $item->supplier_id ? Supplier::find($item->supplier_id) : null;
             return [
-                'supplier_id' => $item->supplier_id,
+                // Use 0 instead of null for unknown supplier so the frontend can route to the debt endpoint
+                'supplier_id' => $item->supplier_id ?? 0,
                 'supplier_name' => $supplier->name ?? 'مورد غير معروف',
                 'supplier_phone' => $supplier->phone ?? '',
                 'supplier_company' => $supplier->company_name ?? '',
@@ -144,30 +145,38 @@ class SupplierController extends Controller
 
     /**
      * Get unpaid purchases for a specific supplier
+     * supplierId = 0 returns purchases with NULL supplier_id (unknown supplier)
      */
     public function getSupplierDebt(Request $request, $supplierId)
     {
-        $purchases = \App\Models\Purchase::with(['warehouse', 'user'])
-            ->where('supplier_id', $supplierId)
-            ->where('due_amount', '>', 0)
-            ->orderByDesc('date')
-            ->get()
-            ->map(function ($purchase) {
-                return [
-                    'id' => $purchase->id,
-                    'reference' => $purchase->reference,
-                    'warehouse_name' => $purchase->warehouse->name ?? '',
-                    'date' => $purchase->date,
-                    'status' => $purchase->status,
-                    'payment_status' => $purchase->payment_status,
-                    'grand_total' => (float) $purchase->grand_total,
-                    'paid_amount' => (float) $purchase->paid_amount,
-                    'due_amount' => (float) $purchase->due_amount,
-                    'days_old' => $purchase->date ? \Carbon\Carbon::parse($purchase->date)->diffInDays(now()) : null,
-                ];
-            });
+        $isUnknown = ((int) $supplierId) === 0;
 
-        $supplier = Supplier::find($supplierId);
+        $query = \App\Models\Purchase::with(['warehouse', 'user'])
+            ->where('due_amount', '>', 0)
+            ->orderByDesc('date');
+
+        if ($isUnknown) {
+            $query->whereNull('supplier_id');
+        } else {
+            $query->where('supplier_id', $supplierId);
+        }
+
+        $purchases = $query->get()->map(function ($purchase) {
+            return [
+                'id' => $purchase->id,
+                'reference' => $purchase->reference,
+                'warehouse_name' => $purchase->warehouse->name ?? '',
+                'date' => $purchase->date,
+                'status' => $purchase->status,
+                'payment_status' => $purchase->payment_status,
+                'grand_total' => (float) $purchase->grand_total,
+                'paid_amount' => (float) $purchase->paid_amount,
+                'due_amount' => (float) $purchase->due_amount,
+                'days_old' => $purchase->date ? \Carbon\Carbon::parse($purchase->date)->diffInDays(now()) : null,
+            ];
+        });
+
+        $supplier = $isUnknown ? null : Supplier::find($supplierId);
 
         return response()->json([
             'supplier' => $supplier ? [
@@ -177,7 +186,14 @@ class SupplierController extends Controller
                 'company_name' => $supplier->company_name,
                 'address' => $supplier->address,
                 'balance' => (float) $supplier->balance,
-            ] : null,
+            ] : ($isUnknown ? [
+                'id' => 0,
+                'name' => 'مورد غير معروف',
+                'phone' => null,
+                'company_name' => null,
+                'address' => null,
+                'balance' => 0,
+            ] : null),
             'purchases' => $purchases,
             'totals' => [
                 'total_due' => $purchases->sum('grand_total'),

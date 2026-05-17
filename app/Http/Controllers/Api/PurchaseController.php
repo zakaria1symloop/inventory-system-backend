@@ -18,7 +18,9 @@ class PurchaseController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Purchase::with(['supplier', 'warehouse', 'user']);
+        $query = Purchase::with(['supplier', 'warehouse', 'user'])
+            ->withCount('returns')
+            ->withSum('returns as returns_total', 'total_amount');
 
         if ($request->supplier_id) {
             $query->where('supplier_id', $request->supplier_id);
@@ -89,6 +91,7 @@ class PurchaseController extends Controller
                 'tax' => $request->tax ?? 0,
                 'shipping' => $request->shipping ?? 0,
                 'timbre' => $request->timbre ?? 0,
+                'timbre_percentage' => $request->timbre_percentage ?? 0,
                 'note' => $request->note,
                 'status' => $isDraft ? 'pending' : 'received',
             ]);
@@ -291,7 +294,7 @@ class PurchaseController extends Controller
                 'items.*.tax' => 'nullable|numeric|min:0',
             ]);
 
-            $purchase->update($request->only(['supplier_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'note']));
+            $purchase->update($request->only(['supplier_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'timbre_percentage', 'note']));
 
             if ($request->has('items')) {
                 $purchase->items()->forceDelete();
@@ -323,6 +326,7 @@ class PurchaseController extends Controller
                 'tax' => 'nullable|numeric|min:0',
                 'shipping' => 'nullable|numeric|min:0',
                 'timbre' => 'nullable|numeric|min:0',
+                'paid_amount' => 'nullable|numeric|min:0',
                 'note' => 'nullable|string',
                 'items' => 'nullable|array|min:1',
                 'items.*.product_id' => 'required|exists:products,id',
@@ -337,6 +341,7 @@ class PurchaseController extends Controller
             try {
                 $oldGrandTotal = $purchase->grand_total;
                 $oldSupplierId = $purchase->supplier_id;
+                $oldPaidAmount = (float) $purchase->paid_amount;
 
                 if ($request->has('items')) {
                     // Reverse old stock movements
@@ -381,13 +386,14 @@ class PurchaseController extends Controller
                     }
                 }
 
-                $purchase->update($request->only(['supplier_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'note']));
+                $purchase->update($request->only(['supplier_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'timbre_percentage', 'paid_amount', 'note']));
                 $purchase->calculateTotals();
                 $purchase->refresh();
 
                 // Adjust supplier balance based on changes
                 $newSupplierId = $purchase->supplier_id;
                 $newGrandTotal = $purchase->grand_total;
+                $newPaidAmount = (float) $purchase->paid_amount;
 
                 if ($oldSupplierId != $newSupplierId) {
                     // Supplier changed: remove debt from old, add to new
@@ -398,10 +404,28 @@ class PurchaseController extends Controller
                         $purchase->supplier->updateBalance($newGrandTotal, 'add');
                     }
                 } else if ($newSupplierId) {
-                    // Same supplier: adjust by the difference
-                    $totalDiff = $newGrandTotal - $oldGrandTotal;
-                    if ($totalDiff != 0) {
-                        $purchase->supplier->updateBalance(abs($totalDiff), $totalDiff > 0 ? 'add' : 'subtract');
+                    // Same supplier: adjust by the difference in (grand_total - paid_amount)
+                    $oldOwed = $oldGrandTotal - $oldPaidAmount;
+                    $newOwed = $newGrandTotal - $newPaidAmount;
+                    $owedDiff = $newOwed - $oldOwed;
+                    if ($owedDiff != 0) {
+                        $purchase->supplier->updateBalance(abs($owedDiff), $owedDiff > 0 ? 'add' : 'subtract');
+                    }
+                }
+
+                // Record caisse transaction for any added/removed payment
+                $paidDelta = $newPaidAmount - $oldPaidAmount;
+                if ($paidDelta != 0) {
+                    $caisse = Caisse::where('type', 'principale')->where('is_active', true)->first();
+                    if ($caisse) {
+                        $caisse->addTransaction(
+                            $paidDelta > 0 ? 'out' : 'in',
+                            abs($paidDelta),
+                            Purchase::class,
+                            $purchase->id,
+                            ($paidDelta > 0 ? 'دفع إضافي على فاتورة شراء ' : 'استرجاع دفعة فاتورة شراء ') . $purchase->reference,
+                            auth()->id()
+                        );
                     }
                 }
 
@@ -581,35 +605,63 @@ class PurchaseController extends Controller
             return response()->json(['message' => 'تم حذف المسودة بنجاح']);
         }
 
-        // Received purchases: security checks for traceability
-        if ($purchase->payment_status === 'paid') {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة مدفوعة. استخدم المرتجعات للحفاظ على التتبع المحاسبي'
-            ], 400);
-        }
-
-        if ($purchase->payment_status === 'partial') {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها دفعات. استخدم المرتجعات للحفاظ على التتبع المحاسبي'
-            ], 400);
-        }
-
-        if ($purchase->payments()->exists()) {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها دفعات مسجلة. استخدم المرتجعات بدلاً من ذلك'
-            ], 400);
-        }
-
-        if ($purchase->returns()->exists()) {
-            return response()->json([
-                'message' => 'لا يمكن حذف فاتورة بها مرتجعات. هذه الفاتورة مرتبطة بعمليات أخرى'
-            ], 400);
-        }
-
         DB::beginTransaction();
 
         try {
-            // Reverse stock movements (only for received purchases - which is guaranteed here)
+            // 1. Delete associated returns and reverse their stock + financial impact
+            $totalReturnedAmount = 0;
+            foreach ($purchase->returns as $return) {
+                $totalReturnedAmount += (float) ($return->total_amount ?? 0);
+
+                foreach ($return->items as $returnItem) {
+                    StockMovement::record(
+                        $returnItem->product_id,
+                        $purchase->warehouse_id,
+                        $returnItem->quantity,
+                        StockMovement::TYPE_PURCHASE,
+                        $purchase->reference . '-RET-CANCEL',
+                        $purchase,
+                        $returnItem->unit_price ?? 0,
+                        'إلغاء مرتجع مرتبط بفاتورة شراء محذوفة'
+                    );
+                }
+
+                // Reverse the caisse credit that was recorded when the return was created
+                if ((float) ($return->total_amount ?? 0) > 0) {
+                    $caisse = Caisse::where('type', 'principale')->where('is_active', true)->first();
+                    if ($caisse) {
+                        $caisse->addTransaction(
+                            'out',
+                            $return->total_amount,
+                            PurchaseReturn::class,
+                            $return->id,
+                            'إلغاء مرتجع - فاتورة شراء ' . $purchase->reference,
+                            auth()->id()
+                        );
+                    }
+                }
+
+                $return->items()->delete();
+                $return->delete();
+            }
+
+            // 2. Delete associated payments and reverse caisse
+            foreach ($purchase->payments as $payment) {
+                $caisse = Caisse::where('type', 'principale')->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'in',
+                        $payment->amount,
+                        Purchase::class,
+                        $purchase->id,
+                        'إلغاء دفعة - فاتورة شراء ' . $purchase->reference,
+                        auth()->id()
+                    );
+                }
+                $payment->delete();
+            }
+
+            // 3. Reverse stock movements
             foreach ($purchase->items as $item) {
                 StockMovement::record(
                     $item->product_id,
@@ -623,26 +675,21 @@ class PurchaseController extends Controller
                 );
             }
 
-            // Reverse supplier balance (debt decreases)
+            // 4. Reverse supplier balance
+            // Net = grand_total (we owed) - paid_amount (we already paid) - returns (we got credit for)
+            // We must reverse all three to get the supplier back to where they were before this purchase.
             if ($purchase->supplier_id) {
                 $purchase->supplier->updateBalance($purchase->grand_total, 'subtract');
-            }
-
-            // Reverse caisse transactions (money comes back IN)
-            if ($purchase->paid_amount > 0) {
-                $caisse = Caisse::where('type', 'principale')->where('is_active', true)->first();
-                if ($caisse) {
-                    $caisse->addTransaction(
-                        'in',
-                        $purchase->paid_amount,
-                        Purchase::class,
-                        $purchase->id,
-                        'إلغاء فاتورة شراء ' . $purchase->reference,
-                        auth()->id()
-                    );
+                if ($purchase->paid_amount > 0) {
+                    $purchase->supplier->updateBalance($purchase->paid_amount, 'add');
+                }
+                if ($totalReturnedAmount > 0) {
+                    // Returns originally subtracted from balance; reversing the delete must add them back.
+                    $purchase->supplier->updateBalance($totalReturnedAmount, 'add');
                 }
             }
 
+            // 5. Delete purchase
             $purchase->delete();
 
             DB::commit();
@@ -650,7 +697,7 @@ class PurchaseController extends Controller
             return response()->json(['message' => 'تم حذف المشتريات بنجاح']);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['message' => 'حدث خطأ أثناء الحذف'], 500);
+            return response()->json(['message' => 'حدث خطأ أثناء الحذف: ' . $e->getMessage()], 500);
         }
     }
 

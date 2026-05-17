@@ -24,6 +24,7 @@ class Purchase extends Model
         'tax',
         'shipping',
         'timbre',
+        'timbre_percentage',
         'grand_total',
         'paid_amount',
         'due_amount',
@@ -39,6 +40,7 @@ class Purchase extends Model
         'tax' => 'decimal:2',
         'shipping' => 'decimal:2',
         'timbre' => 'decimal:2',
+        'timbre_percentage' => 'decimal:2',
         'grand_total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
@@ -89,6 +91,15 @@ class Purchase extends Model
         }
 
         $this->total_amount = $totalAmount;
+
+        // Recompute timbre from percentage on the AFTER-DISCOUNT base, so the
+        // stamp tax never gets applied on the pre-discount amount even if the
+        // client sent a stale figure.
+        if ($this->timbre_percentage > 0) {
+            $afterDiscount = max(0, $this->total_amount - $this->discount);
+            $this->timbre = round($afterDiscount * ($this->timbre_percentage / 100), 2);
+        }
+
         $this->grand_total = $this->total_amount - $this->discount + $this->tax + $this->shipping + $this->timbre;
 
         // Pending purchases have no real debt yet

@@ -75,4 +75,39 @@ class Unit extends Model
             ? $quantity / $this->operation_value
             : $quantity * $this->operation_value;
     }
+
+    /**
+     * Walk up base_unit_id chain until reaching a root unit.
+     */
+    public function rootUnitId(): ?int
+    {
+        $current = $this;
+        $seen = [];
+        while ($current && $current->base_unit_id) {
+            if (in_array($current->id, $seen)) break; // safety against cycles
+            $seen[] = $current->id;
+            $current = $current->baseUnit;
+        }
+        return $current?->id;
+    }
+
+    /**
+     * Two units are compatible when they share the same root unit
+     * (i.e. one is convertible into the other).
+     */
+    public static function compatible(?int $unitAId, ?int $unitBId): bool
+    {
+        if ($unitAId === null || $unitBId === null) {
+            return true; // missing unit means we can't enforce — defer to other validation
+        }
+        if ($unitAId === $unitBId) {
+            return true;
+        }
+        $a = self::find($unitAId);
+        $b = self::find($unitBId);
+        if (!$a || !$b) {
+            return true;
+        }
+        return $a->rootUnitId() === $b->rootUnitId();
+    }
 }

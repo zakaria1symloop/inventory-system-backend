@@ -15,6 +15,7 @@ class Product extends Model
         'name',
         'category_id',
         'brand_id',
+        'supplier_id',
         'unit_buy_id',
         'unit_sale_id',
         'barcode',
@@ -65,6 +66,11 @@ class Product extends Model
     public function brand()
     {
         return $this->belongsTo(Brand::class);
+    }
+
+    public function supplier()
+    {
+        return $this->belongsTo(Supplier::class);
     }
 
     public function unitBuy()

@@ -90,20 +90,30 @@ class SaasPaymentController extends Controller
         if (!$result['success']) {
             Log::error('SlickPay invoice creation failed', ['result' => $result]);
             $payment->update(['status' => 'failed']);
+            $gatewayMessage = $result['data']['message']
+                ?? $result['data']['error']
+                ?? (is_array($result['data']) ? json_encode($result['data']) : null);
             return response()->json([
                 'message' => 'فشل في إنشاء جلسة الدفع. حاول مرة أخرى.',
+                'gateway_error' => $gatewayMessage,
+                'gateway_status' => $result['status'] ?? null,
             ], 500);
         }
 
-        $invoiceData = $result['data'];
+        // SlickPay wraps the invoice payload under `data` — unwrap if present
+        $raw = $result['data'];
+        $invoiceData = is_array($raw) && isset($raw['data']) ? $raw['data'] : $raw;
+        $checkoutUrl = $invoiceData['url'] ?? $raw['url'] ?? null;
+        $invoiceId = $invoiceData['id'] ?? $raw['id'] ?? null;
+
         $payment->update([
-            'gateway_invoice_id' => $invoiceData['id'] ?? null,
-            'gateway_checkout_url' => $invoiceData['url'] ?? null,
+            'gateway_invoice_id' => $invoiceId,
+            'gateway_checkout_url' => $checkoutUrl,
         ]);
 
         return response()->json([
             'payment_id' => $payment->id,
-            'checkout_url' => $invoiceData['url'] ?? null,
+            'checkout_url' => $checkoutUrl,
             'amount' => $amount,
             'plan' => $newPlan,
         ]);

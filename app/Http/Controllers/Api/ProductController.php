@@ -29,21 +29,11 @@ class ProductController extends Controller
     {
         $warehouseId = $request->warehouse_id;
 
-        // Default to main warehouse if not specified
-        if (!$warehouseId) {
-            $warehouseId = Warehouse::where('is_main', true)->value('id');
-        }
-
-        // Eager load stock for specific warehouse if provided
-        if ($warehouseId) {
-            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'categoryPrices',
-                'stock' => function ($q) use ($warehouseId) {
-                    $q->where('warehouse_id', $warehouseId);
-                }
-            ]);
-        } else {
-            $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'stock', 'categoryPrices']);
-        }
+        // Always eager-load ALL stock entries so the frontend can compute
+        // per-warehouse availability and show stock from other warehouses.
+        // (Previously this filtered stock to the main warehouse, hiding
+        // stock that existed in sub-warehouses.)
+        $query = Product::with(['category', 'brand', 'unitBuy', 'unitSale', 'stock', 'categoryPrices']);
 
         if ($request->search) {
             $query->where(function ($q) use ($request) {
@@ -58,6 +48,16 @@ class ProductController extends Controller
 
         if ($request->brand_id) {
             $query->where('brand_id', $request->brand_id);
+        }
+
+        // Filter by supplier — products with no supplier set are also returned
+        // so that pre-existing inventory remains visible until users assign suppliers.
+        if ($request->supplier_id) {
+            $supplierId = $request->supplier_id;
+            $query->where(function ($q) use ($supplierId) {
+                $q->where('supplier_id', $supplierId)
+                  ->orWhereNull('supplier_id');
+            });
         }
 
         if ($request->active_only) {
@@ -100,6 +100,7 @@ class ProductController extends Controller
             'name' => 'required|string|max:255',
             'category_id' => 'nullable|exists:categories,id',
             'brand_id' => 'nullable|exists:brands,id',
+            'supplier_id' => 'nullable|exists:suppliers,id',
             'unit_buy_id' => 'nullable|exists:units,id',
             'unit_sale_id' => 'nullable|exists:units,id',
             'barcode' => 'nullable|unique:products',
@@ -116,6 +117,14 @@ class ProductController extends Controller
             'warehouse_id' => 'nullable|exists:warehouses,id',
             'image' => 'nullable|image|max:2048',
         ]);
+
+        // Buy and sale units must be convertible (share same root unit)
+        if (!\App\Models\Unit::compatible($request->unit_buy_id, $request->unit_sale_id)) {
+            return response()->json([
+                'message' => 'وحدة الشراء ووحدة البيع غير متوافقتين (مثلاً كيلوغرام لا يُباع بالقطعة).',
+                'errors' => ['unit_sale_id' => ['Sale unit incompatible with buy unit']],
+            ], 422);
+        }
 
         $data = $request->except(['image', 'warehouse_id', 'opening_stock', 'category_prices']);
 
@@ -158,12 +167,12 @@ class ProductController extends Controller
             }
         }
 
-        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'categoryPrices']), 201);
+        return response()->json($product->load(['category', 'brand', 'supplier', 'unitBuy', 'unitSale', 'categoryPrices']), 201);
     }
 
     public function show(Product $product)
     {
-        return response()->json($product->load(['category', 'brand', 'unitBuy', 'unitSale', 'stock.warehouse', 'categoryPrices']));
+        return response()->json($product->load(['category', 'brand', 'supplier', 'unitBuy', 'unitSale', 'stock.warehouse', 'categoryPrices']));
     }
 
     public function update(Request $request, Product $product)
@@ -172,6 +181,7 @@ class ProductController extends Controller
             'name' => 'string|max:255',
             'category_id' => 'nullable|exists:categories,id',
             'brand_id' => 'nullable|exists:brands,id',
+            'supplier_id' => 'nullable|exists:suppliers,id',
             'unit_buy_id' => 'nullable|exists:units,id',
             'unit_sale_id' => 'nullable|exists:units,id',
             'barcode' => 'nullable|unique:products,barcode,' . $product->id,
@@ -186,6 +196,16 @@ class ProductController extends Controller
             'stock_alert' => 'nullable|integer|min:0',
             'image' => 'nullable|image|max:2048',
         ]);
+
+        // Buy and sale units must be convertible (share same root unit)
+        $effectiveBuy = $request->unit_buy_id ?? $product->unit_buy_id;
+        $effectiveSale = $request->unit_sale_id ?? $product->unit_sale_id;
+        if (!\App\Models\Unit::compatible($effectiveBuy, $effectiveSale)) {
+            return response()->json([
+                'message' => 'وحدة الشراء ووحدة البيع غير متوافقتين (مثلاً كيلوغرام لا يُباع بالقطعة).',
+                'errors' => ['unit_sale_id' => ['Sale unit incompatible with buy unit']],
+            ], 422);
+        }
 
         $data = $request->except(['image', 'category_prices']);
 

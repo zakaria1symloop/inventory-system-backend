@@ -10,6 +10,7 @@ use App\Models\SaleReturnItem;
 use App\Models\Stock;
 use App\Models\StockMovement;
 use App\Models\Caisse;
+use App\Models\Client;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -18,7 +19,9 @@ class SaleController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Sale::with(['client', 'warehouse', 'user', 'items.product:id,pieces_per_package']);
+        $query = Sale::with(['client', 'warehouse', 'user', 'items.product:id,pieces_per_package'])
+            ->withCount('returns')
+            ->withSum('returns as returns_total', 'total_amount');
 
         if ($request->client_id) {
             $query->where('client_id', $request->client_id);
@@ -80,6 +83,43 @@ class SaleController extends Controller
 
         $isDraft = ($request->status ?? 'completed') === 'draft';
 
+        // Enforce client credit limit (max debt) for non-draft sales with a client
+        if (!$isDraft && $request->client_id) {
+            $client = Client::find($request->client_id);
+            if ($client && (float) $client->credit_limit > 0) {
+                $itemsTotal = 0;
+                foreach ($request->items as $item) {
+                    $qty = (float) ($item['quantity'] ?? 0);
+                    $price = (float) ($item['unit_price'] ?? 0);
+                    $disc = (float) ($item['discount'] ?? 0);
+                    $tx = (float) ($item['tax'] ?? 0);
+                    $itemsTotal += ($price * $qty) - $disc + $tx;
+                }
+                $expectedGrandTotal = $itemsTotal
+                    - (float) ($request->discount ?? 0)
+                    + (float) ($request->tax ?? 0)
+                    + (float) ($request->shipping ?? 0)
+                    + (float) ($request->timbre ?? 0);
+                $paidAmount = (float) ($request->paid_amount ?? 0);
+                $unpaid = max(0, $expectedGrandTotal - $paidAmount);
+                $projectedBalance = (float) $client->balance + $unpaid;
+                if ($projectedBalance > (float) $client->credit_limit) {
+                    return response()->json([
+                        'message' => sprintf(
+                            'تجاوز سقف الدين للزبون %s. السقف: %s، الرصيد الحالي: %s، المبلغ غير المدفوع: %s',
+                            $client->name,
+                            number_format((float) $client->credit_limit, 2),
+                            number_format((float) $client->balance, 2),
+                            number_format($unpaid, 2)
+                        ),
+                        'errors' => [
+                            'client_id' => ['Credit limit exceeded'],
+                        ],
+                    ], 422);
+                }
+            }
+        }
+
         DB::beginTransaction();
 
         try {
@@ -123,6 +163,8 @@ class SaleController extends Controller
                 'tax' => $request->tax ?? 0,
                 'shipping' => $request->shipping ?? 0,
                 'timbre' => $request->timbre ?? 0,
+                'timbre_percentage' => $request->timbre_percentage ?? 0,
+                'tax_percentage' => $request->tax_percentage ?? 0,
                 'note' => $request->note,
                 'status' => $isDraft ? 'draft' : 'completed',
                 'source' => $source,
@@ -322,7 +364,10 @@ class SaleController extends Controller
             }
 
             $sale->status = 'completed';
-            $sale->save();
+            // Initialize payment fields for the now-completed sale.
+            // calculateTotals() sets due_amount = grand_total - paid_amount and payment_status.
+            $sale->calculateTotals();
+            $sale->refresh();
 
             // Handle payment
             $paidAmount = $request->paid_amount ?? 0;
@@ -454,7 +499,7 @@ class SaleController extends Controller
                 'items.*.tax' => 'nullable|numeric|min:0',
             ]);
 
-            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'shipping', 'timbre', 'note']));
+            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'tax_percentage', 'shipping', 'timbre', 'timbre_percentage', 'paid_amount', 'note']));
 
             // If items are provided, replace them
             if ($request->has('items')) {
@@ -479,28 +524,116 @@ class SaleController extends Controller
             return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
         }
 
-        // Non-draft sales: only allow limited fields
+        // Non-draft (completed) sales: full edit with stock reversal
         $request->validate([
+            'client_id' => 'nullable|exists:clients,id',
+            'warehouse_id' => 'nullable|exists:warehouses,id',
+            'date' => 'nullable|date',
             'discount' => 'nullable|numeric|min:0',
             'tax' => 'nullable|numeric|min:0',
             'shipping' => 'nullable|numeric|min:0',
             'timbre' => 'nullable|numeric|min:0',
+            'paid_amount' => 'nullable|numeric|min:0',
             'note' => 'nullable|string',
+            'items' => 'nullable|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.discount' => 'nullable|numeric|min:0',
+            'items.*.tax' => 'nullable|numeric|min:0',
         ]);
 
-        $oldGrandTotal = $sale->grand_total;
+        DB::beginTransaction();
+        try {
+            $oldGrandTotal = $sale->grand_total;
+            $oldClientId = $sale->client_id;
+            $oldPaidAmount = (float) $sale->paid_amount;
 
-        $sale->update($request->only(['discount', 'tax', 'shipping', 'timbre', 'note']));
-        $sale->calculateTotals();
-        $sale->refresh();
+            // If items changed, reverse old stock and apply new
+            if ($request->has('items')) {
+                // Reverse old stock
+                foreach ($sale->items as $item) {
+                    StockMovement::record(
+                        $item->product_id,
+                        $sale->warehouse_id,
+                        $item->quantity,
+                        StockMovement::TYPE_SALE_RETURN,
+                        $sale->reference . '-EDIT-REV',
+                        $sale,
+                        $item->unit_price,
+                        'تعديل فاتورة - إرجاع قديم'
+                    );
+                }
 
-        // Adjust client balance if grand_total changed
-        $totalDiff = $sale->grand_total - $oldGrandTotal;
-        if ($totalDiff != 0 && $sale->client_id) {
-            $sale->client->updateBalance(abs($totalDiff), $totalDiff > 0 ? 'add' : 'subtract');
+                // Delete old items
+                $sale->items()->forceDelete();
+
+                // Create new items and deduct stock
+                $newWarehouseId = $request->warehouse_id ?? $sale->warehouse_id;
+                foreach ($request->items as $item) {
+                    $product = \App\Models\Product::find($item['product_id']);
+                    SaleItem::create([
+                        'sale_id' => $sale->id,
+                        'product_id' => $item['product_id'],
+                        'quantity' => $item['quantity'],
+                        'unit_price' => $item['unit_price'],
+                        'cost_price' => $product->cost_price ?? 0,
+                        'discount' => $item['discount'] ?? 0,
+                        'tax' => $item['tax'] ?? 0,
+                    ]);
+
+                    StockMovement::record(
+                        $item['product_id'],
+                        $newWarehouseId,
+                        $item['quantity'],
+                        StockMovement::TYPE_SALE,
+                        $sale->reference . '-EDIT-NEW',
+                        $sale,
+                        $item['unit_price'],
+                        'تعديل فاتورة - خصم جديد'
+                    );
+                }
+            }
+
+            $sale->update($request->only(['client_id', 'warehouse_id', 'date', 'discount', 'tax', 'tax_percentage', 'shipping', 'timbre', 'timbre_percentage', 'paid_amount', 'note']));
+            $sale->calculateTotals();
+            $sale->refresh();
+
+            $newPaidAmount = (float) $sale->paid_amount;
+
+            // Adjust client balance — client owes (grand_total - paid_amount)
+            if ($oldClientId) {
+                $oldClient = Client::find($oldClientId);
+                if ($oldClient) {
+                    $oldClient->updateBalance(max(0, $oldGrandTotal - $oldPaidAmount), 'subtract');
+                }
+            }
+            if ($sale->client_id && $sale->client) {
+                $sale->client->updateBalance(max(0, $sale->grand_total - $newPaidAmount), 'add');
+            }
+
+            // Record caisse transaction for the payment delta (only if same client / no client change)
+            $paidDelta = $newPaidAmount - $oldPaidAmount;
+            if ($paidDelta != 0 && $oldClientId === $sale->client_id) {
+                $caisse = Caisse::where('type', 'principale')->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        $paidDelta > 0 ? 'in' : 'out',
+                        abs($paidDelta),
+                        Sale::class,
+                        $sale->id,
+                        ($paidDelta > 0 ? 'دفعة إضافية على فاتورة بيع ' : 'استرجاع دفعة فاتورة بيع ') . $sale->reference,
+                        auth()->id()
+                    );
+                }
+            }
+
+            DB::commit();
+            return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => 'خطأ في تعديل الفاتورة: ' . $e->getMessage()], 500);
         }
-
-        return response()->json($sale->load(['client', 'warehouse', 'user', 'items.product']));
     }
 
     public function destroy(Sale $sale)
@@ -512,17 +645,44 @@ class SaleController extends Controller
             return response()->json(['message' => 'تم حذف المسودة بنجاح']);
         }
 
-        // Check if has any returns
-        if ($sale->returns()->exists()) {
-            return response()->json([
-                'message' => 'لا يمكن إلغاء فاتورة بها مرتجعات. هذه الفاتورة مرتبطة بعمليات أخرى'
-            ], 400);
-        }
-
         DB::beginTransaction();
 
         try {
-            // 1. Reverse stock movements (return items to warehouse)
+            // 1. Delete associated returns and reverse their stock
+            foreach ($sale->returns as $return) {
+                foreach ($return->items as $returnItem) {
+                    StockMovement::record(
+                        $returnItem->product_id,
+                        $sale->warehouse_id,
+                        $returnItem->quantity,
+                        StockMovement::TYPE_SALE,
+                        $sale->reference . '-RET-CANCEL',
+                        $sale,
+                        $returnItem->unit_price ?? 0,
+                        'إلغاء مرتجع مرتبط بفاتورة محذوفة'
+                    );
+                }
+                $return->items()->delete();
+                $return->delete();
+            }
+
+            // 2. Delete associated payments and reverse caisse
+            foreach ($sale->payments as $payment) {
+                $caisse = Caisse::where('user_id', $payment->user_id)->where('is_active', true)->first();
+                if ($caisse) {
+                    $caisse->addTransaction(
+                        'out',
+                        $payment->amount,
+                        Sale::class,
+                        $sale->id,
+                        'إلغاء دفعة - فاتورة ' . $sale->reference,
+                        auth()->id()
+                    );
+                }
+                $payment->delete();
+            }
+
+            // 3. Reverse stock movements (return items to warehouse)
             foreach ($sale->items as $item) {
                 StockMovement::record(
                     $item->product_id,
@@ -536,31 +696,16 @@ class SaleController extends Controller
                 );
             }
 
-            // 2. Reverse client balance (subtract the sale amount that was added as debt)
+            // 4. Reverse client balance
             if ($sale->client_id) {
                 $client = $sale->client;
-                // Remove the sale debt from client
                 $client->updateBalance($sale->grand_total, 'subtract');
-                // Add back the paid amount (was subtracted from debt when paid)
                 if ($sale->paid_amount > 0) {
                     $client->updateBalance($sale->paid_amount, 'add');
                 }
             }
 
-            // 3. Reverse caisse transactions
-            $caisse = Caisse::where('user_id', $sale->user_id)->where('is_active', true)->first();
-            if ($caisse && $sale->paid_amount > 0) {
-                $caisse->addTransaction(
-                    'out',
-                    $sale->paid_amount,
-                    Sale::class,
-                    $sale->id,
-                    'إلغاء فاتورة ' . $sale->reference,
-                    auth()->id()
-                );
-            }
-
-            // 4. Mark as cancelled and soft delete (keeps the record)
+            // 5. Mark as cancelled and soft delete
             $sale->status = 'cancelled';
             $sale->save();
             $sale->delete();

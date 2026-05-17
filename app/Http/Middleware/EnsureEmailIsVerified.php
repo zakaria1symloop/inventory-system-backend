@@ -21,6 +21,11 @@ class EnsureEmailIsVerified
             return $next($request);
         }
 
+        // Phone-registered users have no email to verify — nothing to check.
+        if (empty($user->email)) {
+            return $next($request);
+        }
+
         // Check if tenant has OTP requirement disabled
         $tenant = $request->attributes->get('tenant');
         if ($tenant && !$tenant->otp_required) {

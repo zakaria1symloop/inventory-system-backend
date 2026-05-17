@@ -245,10 +245,15 @@ class PurchaseOrderController extends Controller
             ]);
 
             foreach ($purchaseOrder->items as $item) {
+                // Translate units: PO stores quantity in packages (cartons), Purchase stores it in pieces.
+                // Multiply by pieces_per_package so subtotals match between the PO and the resulting purchase.
+                $piecesPerPackage = max(1, (int) ($item->product->pieces_per_package ?? 1));
+                $totalPieces = (int) $item->quantity * $piecesPerPackage;
+
                 PurchaseItem::create([
                     'purchase_id' => $purchase->id,
                     'product_id' => $item->product_id,
-                    'quantity' => $item->quantity,
+                    'quantity' => $totalPieces,
                     'unit_price' => $item->unit_price,
                     'discount' => $item->discount,
                     'tax' => $item->tax,
@@ -258,7 +263,7 @@ class PurchaseOrderController extends Controller
                 StockMovement::record(
                     $item->product_id,
                     $purchaseOrder->warehouse_id,
-                    $item->quantity,
+                    $totalPieces,
                     StockMovement::TYPE_PURCHASE,
                     $purchase->reference,
                     $purchase,

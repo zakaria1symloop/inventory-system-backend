@@ -12,6 +12,7 @@ class DeliveryOrder extends Model
     protected $fillable = [
         'delivery_id',
         'order_id',
+        'sale_id',
         'client_id',
         'delivery_order',
         'status',

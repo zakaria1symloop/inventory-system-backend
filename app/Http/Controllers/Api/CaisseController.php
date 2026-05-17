@@ -443,4 +443,43 @@ class CaisseController extends Controller
             'caisses' => $caisses,
         ]);
     }
+
+    /**
+     * Aggregated caisse in/out totals for an arbitrary date range.
+     * Used by reports/profit-loss to show real cash movements
+     * (so the P&L page agrees with the caisses module).
+     */
+    public function periodSummary(Request $request)
+    {
+        $user = auth()->user();
+        if (!$user->isAdmin() && !$user->isManager()) {
+            return response()->json(['message' => 'غير مصرح'], 403);
+        }
+
+        $request->validate([
+            'from_date' => 'nullable|date',
+            'to_date' => 'nullable|date',
+        ]);
+
+        $from = $request->from_date ? \Carbon\Carbon::parse($request->from_date)->startOfDay() : \Carbon\Carbon::now()->startOfMonth();
+        $to = $request->to_date ? \Carbon\Carbon::parse($request->to_date)->endOfDay() : \Carbon\Carbon::now()->endOfDay();
+
+        $totalIn = DB::table('caisse_transactions')
+            ->whereBetween('created_at', [$from, $to])
+            ->where('type', 'in')
+            ->sum('amount');
+
+        $totalOut = DB::table('caisse_transactions')
+            ->whereBetween('created_at', [$from, $to])
+            ->where('type', 'out')
+            ->sum('amount');
+
+        return response()->json([
+            'from' => $from->format('Y-m-d'),
+            'to' => $to->format('Y-m-d'),
+            'total_in' => (float) $totalIn,
+            'total_out' => (float) $totalOut,
+            'net' => (float) $totalIn - (float) $totalOut,
+        ]);
+    }
 }

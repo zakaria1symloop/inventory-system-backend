@@ -71,7 +71,7 @@ class ClientController extends Controller
             ->groupBy('client_id')
             ->pluck('sales_debt', 'client_id');
 
-        // Get delivery debt per client
+        // Get delivery debt per client (exclude orders already linked to a sale to prevent double-count)
         $deliveryDebts = DeliveryOrder::select(
                 'client_id',
                 DB::raw('SUM(amount_due - amount_collected) as delivery_debt')
@@ -79,6 +79,7 @@ class ClientController extends Controller
             ->whereIn('client_id', $clientIds)
             ->whereIn('status', ['delivered', 'partial'])
             ->whereRaw('amount_due > amount_collected')
+            ->whereNull('sale_id')
             ->groupBy('client_id')
             ->pluck('delivery_debt', 'client_id');
 

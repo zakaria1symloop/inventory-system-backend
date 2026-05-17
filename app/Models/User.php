@@ -22,6 +22,7 @@ class User extends Authenticatable
         'role',
         'is_active',
         'can_collect_debt',
+        'sell_from_main_stock',
         'warehouse_id',
         'email_verified_at',
         'latitude',

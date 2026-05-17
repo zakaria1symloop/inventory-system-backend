@@ -43,17 +43,46 @@ class InventoryController extends Controller
             $query->where('category_id', $request->category_id);
         }
 
-        // Filter by stock status (uses having on total_stock which works with both scoped and unscoped withSum)
+        // Filter by stock status — use whereExists subqueries instead of HAVING.
+        // HAVING on the `total_stock` alias breaks Laravel paginate (count query strips the alias column).
         if ($request->stock_status) {
+            $warehouseFilter = $request->warehouse_id;
             switch ($request->stock_status) {
                 case 'in_stock':
-                    $query->having('total_stock', '>', 0);
+                    $query->whereExists(function ($q) use ($warehouseFilter) {
+                        $q->select(DB::raw(1))
+                          ->from('stock')
+                          ->whereColumn('stock.product_id', 'products.id')
+                          ->where('stock.quantity', '>', 0);
+                        if ($warehouseFilter) {
+                            $q->where('stock.warehouse_id', $warehouseFilter);
+                        }
+                    });
                     break;
                 case 'low_stock':
-                    $query->havingRaw('total_stock > 0 AND total_stock <= stock_alert * COALESCE(pieces_per_package, 1)');
+                    // total stock > 0 AND total stock <= stock_alert * pieces_per_package
+                    $query->whereRaw(
+                        '(SELECT COALESCE(SUM(`stock`.`quantity`), 0) FROM `stock` WHERE `stock`.`product_id` = `products`.`id`'
+                        . ($warehouseFilter ? ' AND `stock`.`warehouse_id` = ?' : '')
+                        . ') > 0',
+                        $warehouseFilter ? [$warehouseFilter] : []
+                    )->whereRaw(
+                        '(SELECT COALESCE(SUM(`stock`.`quantity`), 0) FROM `stock` WHERE `stock`.`product_id` = `products`.`id`'
+                        . ($warehouseFilter ? ' AND `stock`.`warehouse_id` = ?' : '')
+                        . ') <= `products`.`stock_alert` * COALESCE(`products`.`pieces_per_package`, 1)',
+                        $warehouseFilter ? [$warehouseFilter] : []
+                    );
                     break;
                 case 'out_of_stock':
-                    $query->having('total_stock', '<=', 0);
+                    $query->whereNotExists(function ($q) use ($warehouseFilter) {
+                        $q->select(DB::raw(1))
+                          ->from('stock')
+                          ->whereColumn('stock.product_id', 'products.id')
+                          ->where('stock.quantity', '>', 0);
+                        if ($warehouseFilter) {
+                            $q->where('stock.warehouse_id', $warehouseFilter);
+                        }
+                    });
                     break;
             }
         }

@@ -48,6 +48,16 @@ class PaymentController extends Controller
             $query->whereHasMorph('payable', [Sale::class], fn($q) => $q->where('source', $source));
         }
 
+        if ($request->client_id) {
+            $clientId = $request->client_id;
+            $query->whereHasMorph('payable', [Sale::class], fn($q) => $q->where('client_id', $clientId));
+        }
+
+        if ($request->supplier_id) {
+            $supplierId = $request->supplier_id;
+            $query->whereHasMorph('payable', [Purchase::class], fn($q) => $q->where('supplier_id', $supplierId));
+        }
+
         if ($request->search) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {

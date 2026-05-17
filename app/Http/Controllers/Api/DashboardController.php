@@ -130,8 +130,9 @@ class DashboardController extends Controller
     public function getLowStock(Request $request)
     {
         $products = Product::with(['stock.warehouse'])
+            ->withSum('stock as total_stock', 'quantity')
             ->whereHas('stock', function ($q) {
-                $q->whereRaw('quantity <= products.stock_alert * COALESCE(products.pieces_per_package, 1)');
+                $q->whereRaw('`stock`.`quantity` <= `products`.`stock_alert` * COALESCE(`products`.`pieces_per_package`, 1)');
             })
             ->get()
             ->map(function ($product) {
@@ -140,10 +141,10 @@ class DashboardController extends Controller
                     'name' => $product->name,
                     'barcode' => $product->barcode,
                     'stock_alert' => $product->stock_alert,
-                    'current_stock' => $product->getTotalStock(),
+                    'current_stock' => (float) ($product->total_stock ?? 0),
                     'stock_by_warehouse' => $product->stock->map(function ($s) {
                         return [
-                            'warehouse' => $s->warehouse->name,
+                            'warehouse' => $s->warehouse->name ?? 'Unknown',
                             'quantity' => $s->quantity,
                         ];
                     }),
@@ -156,7 +157,7 @@ class DashboardController extends Controller
     private function getLowStockCount()
     {
         return Product::whereHas('stock', function ($q) {
-            $q->whereRaw('quantity <= products.stock_alert * COALESCE(products.pieces_per_package, 1)');
+            $q->whereRaw('`stock`.`quantity` <= `products`.`stock_alert` * COALESCE(`products`.`pieces_per_package`, 1)');
         })->count();
     }
 

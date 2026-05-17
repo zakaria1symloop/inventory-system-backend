@@ -104,32 +104,73 @@ class ReportController extends Controller
     {
         $fromDate = $request->from_date ? Carbon::parse($request->from_date)->startOfDay() : Carbon::now()->startOfMonth();
         $toDate = $request->to_date ? Carbon::parse($request->to_date)->endOfDay() : Carbon::now()->endOfDay();
+        $categoryId = $request->category_id;
 
-        $query = OrderItem::join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->join('products', 'order_items.product_id', '=', 'products.id')
-            ->leftJoin('categories', 'products.category_id', '=', 'categories.id')
+        // Aggregate from Order items (delivery flow)
+        $orderQuery = OrderItem::join('orders', 'order_items.order_id', '=', 'orders.id')
             ->whereBetween('orders.created_at', [$fromDate, $toDate])
-            ->where('orders.status', 'delivered');
+            ->where('orders.status', 'delivered')
+            ->groupBy('order_items.product_id')
+            ->selectRaw('
+                order_items.product_id as product_id,
+                SUM(order_items.quantity_delivered) as qty,
+                SUM(order_items.subtotal) as revenue
+            ');
 
-        if ($request->category_id) {
-            $query->where('products.category_id', $request->category_id);
+        $orderAgg = $orderQuery->get()->keyBy('product_id');
+
+        // Aggregate from Sale items (web sales flow) — was missing, caused empty report rows
+        $saleQuery = \App\Models\SaleItem::join('sales', 'sale_items.sale_id', '=', 'sales.id')
+            ->whereBetween('sales.created_at', [$fromDate, $toDate])
+            ->whereIn('sales.status', ['completed', 'paid'])
+            ->groupBy('sale_items.product_id')
+            ->selectRaw('
+                sale_items.product_id as product_id,
+                SUM(sale_items.quantity) as qty,
+                SUM(sale_items.subtotal) as revenue
+            ');
+
+        $saleAgg = $saleQuery->get()->keyBy('product_id');
+
+        $productIds = collect($orderAgg->keys())->merge($saleAgg->keys())->unique()->values();
+        if ($productIds->isEmpty()) {
+            return response()->json([
+                'period' => ['from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d')],
+                'data' => [],
+                'totals' => ['total_quantity' => 0, 'total_revenue' => 0, 'total_cost' => 0, 'total_profit' => 0],
+            ]);
         }
 
-        $data = $query->selectRaw('
-                products.id,
-                products.name,
-                products.barcode,
-                categories.name as category_name,
-                products.retail_price,
-                products.cost_price,
-                SUM(order_items.quantity_delivered) as total_quantity,
-                SUM(order_items.subtotal) as total_revenue,
-                SUM(order_items.quantity_delivered * products.cost_price) as total_cost,
-                SUM(order_items.subtotal) - SUM(order_items.quantity_delivered * products.cost_price) as profit
-            ')
-            ->groupBy('products.id', 'products.name', 'products.barcode', 'categories.name', 'products.retail_price', 'products.cost_price')
-            ->orderByDesc('total_revenue')
+        $productsQuery = \App\Models\Product::leftJoin('categories', 'products.category_id', '=', 'categories.id')
+            ->whereIn('products.id', $productIds);
+
+        if ($categoryId) {
+            $productsQuery->where('products.category_id', $categoryId);
+        }
+
+        $products = $productsQuery
+            ->select('products.id', 'products.name', 'products.barcode', 'products.retail_price', 'products.cost_price', 'categories.name as category_name')
             ->get();
+
+        $data = $products->map(function ($product) use ($orderAgg, $saleAgg) {
+            $orderRow = $orderAgg[$product->id] ?? null;
+            $saleRow = $saleAgg[$product->id] ?? null;
+            $qty = (float) ($orderRow->qty ?? 0) + (float) ($saleRow->qty ?? 0);
+            $revenue = (float) ($orderRow->revenue ?? 0) + (float) ($saleRow->revenue ?? 0);
+            $cost = $qty * (float) $product->cost_price;
+            return [
+                'id' => $product->id,
+                'name' => $product->name,
+                'barcode' => $product->barcode,
+                'category_name' => $product->category_name,
+                'retail_price' => $product->retail_price,
+                'cost_price' => $product->cost_price,
+                'total_quantity' => $qty,
+                'total_revenue' => $revenue,
+                'total_cost' => $cost,
+                'profit' => $revenue - $cost,
+            ];
+        })->sortByDesc('total_revenue')->values();
 
         $totals = [
             'total_quantity' => $data->sum('total_quantity'),

@@ -20,6 +20,18 @@ use Google\Client as GoogleClient;
 
 class SaasAuthController extends Controller
 {
+    /**
+     * Pick the localized string for the request's Accept-Language header.
+     * Falls back to Arabic since that's the historical default for this app.
+     */
+    private function localize(Request $request, array $strings): string
+    {
+        $accept = strtolower($request->header('Accept-Language', ''));
+        if (str_starts_with($accept, 'fr')) return $strings['fr'] ?? $strings['en'] ?? $strings['ar'];
+        if (str_starts_with($accept, 'en')) return $strings['en'] ?? $strings['fr'] ?? $strings['ar'];
+        return $strings['ar'] ?? $strings['fr'] ?? $strings['en'] ?? '';
+    }
+
     public function register(Request $request)
     {
         $registerWith = $request->input('register_with', 'email'); // 'email' or 'phone'
@@ -43,19 +55,53 @@ class SaasAuthController extends Controller
             'email.required' => 'البريد الإلكتروني مطلوب.',
         ]);
 
-        // Check uniqueness in master DB
-        if ($registerWith === 'email') {
-            if (TenantEmailMap::where('email', $request->email)->exists()) {
-                return response()->json([
-                    'message' => 'البريد الإلكتروني مسجل مسبقاً.',
-                    'errors' => ['email' => ['البريد الإلكتروني مسجل مسبقاً.']],
-                ], 422);
+        // Check uniqueness in master DB — but clean up orphaned entries
+        // (from prior aborted registrations where Cloud Run timed out before provisioning finished)
+        $existingMap = $registerWith === 'email'
+            ? TenantEmailMap::where('email', $request->email)->first()
+            : TenantEmailMap::where('phone', $request->phone)->first();
+
+        if ($existingMap) {
+            $existingTenant = $existingMap->tenant;
+            $isOrphaned = false;
+
+            if (!$existingTenant) {
+                // Tenant gone — definitely orphaned
+                $isOrphaned = true;
+            } else {
+                // Check if tenant DB exists and has a user
+                try {
+                    TenantService::switchToTenant($existingTenant);
+                    $hasUser = User::query()->exists();
+                    TenantService::switchToMaster();
+                    if (!$hasUser) {
+                        $isOrphaned = true;
+                    }
+                } catch (\Exception $e) {
+                    // Couldn't connect to tenant DB — provisioning never finished
+                    TenantService::switchToMaster();
+                    $isOrphaned = true;
+                }
             }
-        } else {
-            if (TenantEmailMap::where('phone', $request->phone)->exists()) {
+
+            if ($isOrphaned) {
+                // Clean up orphaned tenant + map and let registration continue
+                if ($existingTenant) {
+                    $existingTenant->emailMaps()->delete();
+                    $existingTenant->subscriptions()->delete();
+                    $existingTenant->delete();
+                } else {
+                    $existingMap->delete();
+                }
+            } else {
+                // Real, complete account — block registration
+                $field = $registerWith === 'email' ? 'email' : 'phone';
+                $msg = $registerWith === 'email'
+                    ? 'البريد الإلكتروني مسجل مسبقاً.'
+                    : 'رقم الهاتف مسجل مسبقاً.';
                 return response()->json([
-                    'message' => 'رقم الهاتف مسجل مسبقاً.',
-                    'errors' => ['phone' => ['رقم الهاتف مسجل مسبقاً.']],
+                    'message' => $msg,
+                    'errors' => [$field => [$msg]],
                 ], 422);
             }
         }
@@ -70,6 +116,8 @@ class SaasAuthController extends Controller
                 'product_limit' => $limits['free']['products'],
                 'user_limit' => $limits['free']['users'],
                 'is_active' => true,
+                // Phone-registered tenants have no email to verify, so disable OTP gating.
+                'otp_required' => $registerWith === 'email',
                 'trial_ends_at' => now()->addDays(14),
             ]);
 
@@ -179,15 +227,26 @@ class SaasAuthController extends Controller
         // Find tenant by email or phone
         $tenant = TenantService::findByIdentifier($identifier);
 
+        $invalidCreds = [
+            'ar' => 'بيانات الدخول غير صحيحة.',
+            'fr' => 'Identifiants invalides.',
+            'en' => 'Invalid credentials.',
+        ];
+        $accountDisabled = [
+            'ar' => 'الحساب غير مفعل.',
+            'fr' => 'Compte désactivé.',
+            'en' => 'Account is disabled.',
+        ];
+
         if (!$tenant) {
             return response()->json([
-                'message' => 'بيانات الدخول غير صحيحة.',
+                'message' => $this->localize($request, $invalidCreds),
             ], 401);
         }
 
         if (!$tenant->is_active) {
             return response()->json([
-                'message' => 'الحساب غير مفعل.',
+                'message' => $this->localize($request, $accountDisabled),
             ], 403);
         }
 
@@ -200,14 +259,14 @@ class SaasAuthController extends Controller
         if (!$user || !$user->password || !Hash::check($request->password, $user->password)) {
             TenantService::switchToMaster();
             return response()->json([
-                'message' => 'بيانات الدخول غير صحيحة.',
+                'message' => $this->localize($request, $invalidCreds),
             ], 401);
         }
 
         if (!$user->is_active) {
             TenantService::switchToMaster();
             return response()->json([
-                'message' => 'الحساب غير مفعل.',
+                'message' => $this->localize($request, $accountDisabled),
             ], 403);
         }
 
