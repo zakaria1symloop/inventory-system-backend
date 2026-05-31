@@ -18,11 +18,14 @@ use App\Models\User;
 use App\Models\VanReturn;
 use App\Models\VanSession;
 use App\Models\Warehouse;
+use App\Traits\LocalizesMessages;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class DeliveryController extends Controller
 {
+    use LocalizesMessages;
+
     public function index(Request $request)
     {
         $query = Delivery::with(['livreur', 'vehicle']);
@@ -141,10 +144,16 @@ class DeliveryController extends Controller
         ]));
     }
 
-    public function start(Delivery $delivery)
+    public function start(Request $request, Delivery $delivery)
     {
         if ($delivery->status !== 'preparing') {
-            return response()->json(['message' => 'التوصيل ليس في حالة تحضير'], 400);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'التوصيل ليس في حالة تحضير',
+                    'fr' => "La livraison n'est pas en préparation",
+                    'en' => 'Delivery is not in preparing state',
+                ]),
+            ], 400);
         }
 
         DB::beginTransaction();
@@ -169,7 +178,11 @@ class DeliveryController extends Controller
 
             if (count($stockErrors) > 0) {
                 return response()->json([
-                    'message' => 'الكمية غير متوفرة في المخزون',
+                    'message' => $this->localize($request, [
+                        'ar' => 'الكمية غير متوفرة في المخزون',
+                        'fr' => 'Quantité insuffisante en stock',
+                        'en' => 'Insufficient stock',
+                    ]),
                     'errors' => $stockErrors
                 ], 400);
             }
@@ -218,10 +231,16 @@ class DeliveryController extends Controller
         }
     }
 
-    public function complete(Delivery $delivery)
+    public function complete(Request $request, Delivery $delivery)
     {
         if ($delivery->status !== 'in_progress') {
-            return response()->json(['message' => 'التوصيل ليس قيد التنفيذ'], 400);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'التوصيل ليس قيد التنفيذ',
+                    'fr' => "La livraison n'est pas en cours",
+                    'en' => 'Delivery is not in progress',
+                ]),
+            ], 400);
         }
 
         $delivery->complete();
@@ -233,17 +252,35 @@ class DeliveryController extends Controller
     {
         // Allow delivery for pending or postponed orders
         if (!in_array($deliveryOrder->status, ['pending', 'postponed'])) {
-            return response()->json(['message' => 'حالة الطلب غير صالحة'], 400);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'حالة الطلب غير صالحة',
+                    'fr' => 'Statut de commande invalide',
+                    'en' => 'Invalid order status',
+                ]),
+            ], 400);
         }
 
         $request->validate([
             'amount_collected' => 'nullable|numeric|min:0',
+            // Optional: which old debt(s) the over-payment should clear, chosen
+            // by the livreur (e.g. the client asks to settle a specific invoice).
+            'debt_allocations' => 'nullable|array',
+            'debt_allocations.*.type' => 'required_with:debt_allocations|in:sale,delivery',
+            'debt_allocations.*.id' => 'required_with:debt_allocations|integer',
+            'debt_allocations.*.amount' => 'required_with:debt_allocations|numeric|min:0',
         ]);
 
         // If collecting more than amount_due (debt collection), check permission
         $amountCollected = $request->amount_collected ?? $deliveryOrder->amount_due;
         if ($amountCollected > $deliveryOrder->amount_due && !auth()->user()->can_collect_debt) {
-            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة',
+                    'fr' => "Vous n'avez pas la permission d'encaisser des dettes. Vous ne pouvez pas collecter plus que le montant de la facture",
+                    'en' => 'You are not allowed to collect debt. You cannot collect more than the invoice amount',
+                ]),
+            ], 403);
         }
 
         DB::beginTransaction();
@@ -300,23 +337,26 @@ class DeliveryController extends Controller
 
             $delivery->updateCounts();
 
-            // Record caisse transaction for collected amount
+            // Record caisse transaction(s) for the collected amount — split so
+            // the ERP tracks the delivery sale and any old-debt recovery as
+            // separate lines instead of one lumped figure.
             if ($amountCollected > 0) {
                 $caisse = Caisse::where('user_id', $delivery->livreur_id)->first();
                 if ($caisse) {
-                    $caisse->addTransaction(
-                        'in',
-                        $amountCollected,
-                        'delivery',
-                        $deliveryOrder->id,
-                        "تحصيل توصيل طلب #{$deliveryOrder->order_id}",
-                        auth()->id()
-                    );
+                    $orderDue = (float) $deliveryOrder->amount_due;
+                    $salePortion = min($amountCollected, $orderDue);
+                    $debtPortion = max(0, $amountCollected - $orderDue);
+                    if ($salePortion > 0) {
+                        $caisse->addTransaction('in', $salePortion, 'delivery', $deliveryOrder->id, "تحصيل توصيل طلب #{$deliveryOrder->order_id}", auth()->id());
+                    }
+                    if ($debtPortion > 0) {
+                        $caisse->addTransaction('in', $debtPortion, 'debt_collection', $deliveryOrder->id, "تحصيل دين سابق - طلب #{$deliveryOrder->order_id}", auth()->id());
+                    }
                 }
             }
 
             // Auto-create sale record from delivered order
-            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected);
+            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected, $request->input('debt_allocations', []));
 
             DB::commit();
 
@@ -348,12 +388,22 @@ class DeliveryController extends Controller
             'items.*.quantity_returned' => 'nullable|integer|min:0',
             'items.*.return_reason' => 'nullable|in:refused,damaged,excess,store_closed,wrong,other',
             'amount_collected' => 'nullable|numeric|min:0',
+            'debt_allocations' => 'nullable|array',
+            'debt_allocations.*.type' => 'required_with:debt_allocations|in:sale,delivery',
+            'debt_allocations.*.id' => 'required_with:debt_allocations|integer',
+            'debt_allocations.*.amount' => 'required_with:debt_allocations|numeric|min:0',
         ]);
 
         // If collecting more than what will be due (debt collection), check permission
         $requestedAmount = $request->input('amount_collected');
         if ($requestedAmount !== null && $requestedAmount !== '' && (float)$requestedAmount > $deliveryOrder->amount_due && !auth()->user()->can_collect_debt) {
-            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'ليس لديك صلاحية تحصيل الديون. لا يمكنك تحصيل أكثر من مبلغ الفاتورة',
+                    'fr' => "Vous n'avez pas la permission d'encaisser des dettes. Vous ne pouvez pas collecter plus que le montant de la facture",
+                    'en' => 'You are not allowed to collect debt. You cannot collect more than the invoice amount',
+                ]),
+            ], 403);
         }
 
         DB::beginTransaction();
@@ -468,23 +518,25 @@ class DeliveryController extends Controller
 
             $delivery->updateCounts();
 
-            // Record caisse transaction for collected amount
+            // Record caisse transaction(s) — split delivery sale vs old-debt
+            // recovery so the ERP can track each stream separately.
             if ($amountCollected > 0) {
                 $caisse = Caisse::where('user_id', $delivery->livreur_id)->first();
                 if ($caisse) {
-                    $caisse->addTransaction(
-                        'in',
-                        $amountCollected,
-                        'delivery',
-                        $deliveryOrder->id,
-                        "تحصيل توصيل جزئي طلب #{$deliveryOrder->order_id}",
-                        auth()->id()
-                    );
+                    $orderDue = (float) $deliveryOrder->amount_due;
+                    $salePortion = min($amountCollected, $orderDue);
+                    $debtPortion = max(0, $amountCollected - $orderDue);
+                    if ($salePortion > 0) {
+                        $caisse->addTransaction('in', $salePortion, 'delivery', $deliveryOrder->id, "تحصيل توصيل جزئي طلب #{$deliveryOrder->order_id}", auth()->id());
+                    }
+                    if ($debtPortion > 0) {
+                        $caisse->addTransaction('in', $debtPortion, 'debt_collection', $deliveryOrder->id, "تحصيل دين سابق - طلب #{$deliveryOrder->order_id}", auth()->id());
+                    }
                 }
             }
 
             // Auto-create sale record from partial delivery
-            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected);
+            $this->createSaleFromDelivery($delivery, $deliveryOrder, $amountCollected, $request->input('debt_allocations', []));
 
             DB::commit();
 
@@ -565,7 +617,7 @@ class DeliveryController extends Controller
      * Create a sale record from a delivered/partial delivery order.
      * This records the delivery as a sale in the sales table (no stock deduction, already handled by delivery).
      */
-    private function createSaleFromDelivery(Delivery $delivery, DeliveryOrder $deliveryOrder, float $amountCollected)
+    private function createSaleFromDelivery(Delivery $delivery, DeliveryOrder $deliveryOrder, float $amountCollected, array $debtAllocations = [])
     {
         $order = $deliveryOrder->order;
         if (!$order) return;
@@ -601,11 +653,92 @@ class DeliveryController extends Controller
 
         $sale->calculateTotals();
 
-        // Set paid amount from what was collected
-        $sale->paid_amount = $amountCollected;
-        $sale->due_amount = max(0, $sale->grand_total - $amountCollected);
+        // Apply the collection to THIS sale first, capped at its own total.
+        $appliedHere = min($amountCollected, (float) $sale->grand_total);
+        $sale->paid_amount = $appliedHere;
+        $sale->due_amount = max(0, (float) $sale->grand_total - $appliedHere);
         $sale->payment_status = $sale->calculatePaymentStatus();
         $sale->save();
+
+        // Keep the ORDER's payment status in sync with what was actually
+        // collected, so the seller/orders views don't show a delivered+paid
+        // order as "non payé / غير مدفوع". Mirrors the sale's computed status
+        // (paid / partial / unpaid). Covers both deliverOrder and partialDelivery.
+        $order->payment_status = $sale->payment_status;
+        $order->save();
+
+        // Over-payment = the "rest" collected toward old debt.
+        $excess = $amountCollected - $appliedHere;
+        if ($excess > 0 && $deliveryOrder->client_id) {
+            // 1) Honour the livreur's explicit choice first: the client may ask
+            //    to settle a SPECIFIC old invoice (e.g. "put it on debt #2").
+            //    Apply to each chosen sale/delivery in order, capped at its own
+            //    remaining and at the money still available.
+            foreach ($debtAllocations as $alloc) {
+                if ($excess <= 0.0001) break;
+                $wanted = (float) ($alloc['amount'] ?? 0);
+                if ($wanted <= 0) continue;
+                $type = $alloc['type'] ?? 'sale';
+                $id = (int) ($alloc['id'] ?? 0);
+                $apply = min($excess, $wanted);
+
+                if ($type === 'sale') {
+                    $os = Sale::where('id', $id)
+                        ->where('client_id', $deliveryOrder->client_id)
+                        ->where('id', '!=', $sale->id)
+                        ->where('due_amount', '>', 0)
+                        ->whereNull('deleted_at')
+                        ->first();
+                    if ($os) {
+                        $apply = min($apply, (float) $os->due_amount);
+                        $os->paid_amount = (float) $os->paid_amount + $apply;
+                        $os->due_amount = max(0, (float) $os->grand_total - (float) $os->paid_amount);
+                        $os->payment_status = $os->calculatePaymentStatus();
+                        $os->save();
+                        $excess -= $apply;
+                    }
+                } elseif ($type === 'delivery') {
+                    $od = DeliveryOrder::where('id', $id)
+                        ->where('client_id', $deliveryOrder->client_id)
+                        ->where('id', '!=', $deliveryOrder->id)
+                        ->whereNull('sale_id')
+                        ->first();
+                    if ($od) {
+                        $remaining = (float) $od->amount_due - (float) $od->amount_collected;
+                        $apply = min($apply, max(0, $remaining));
+                        if ($apply > 0) {
+                            $od->amount_collected = (float) $od->amount_collected + $apply;
+                            $od->save();
+                            $excess -= $apply;
+                        }
+                    }
+                }
+            }
+
+            // 2) Anything still left (no selection, or the chosen debt was
+            //    smaller than the extra) clears the client's OLDEST unpaid sales
+            //    first (FIFO) — same convention as a manual client payment. This
+            //    keeps the dashboard's outstanding debt (sum of sale due_amounts)
+            //    in sync with the client balance, never leaving stale old dues.
+            if ($excess > 0.0001) {
+                $oldSales = Sale::where('client_id', $deliveryOrder->client_id)
+                    ->where('id', '!=', $sale->id)
+                    ->where('due_amount', '>', 0)
+                    ->whereNull('deleted_at')
+                    ->orderBy('date')
+                    ->orderBy('id')
+                    ->get();
+                foreach ($oldSales as $os) {
+                    if ($excess <= 0.0001) break;
+                    $apply = min($excess, (float) $os->due_amount);
+                    $os->paid_amount = (float) $os->paid_amount + $apply;
+                    $os->due_amount = max(0, (float) $os->grand_total - (float) $os->paid_amount);
+                    $os->payment_status = $os->calculatePaymentStatus();
+                    $os->save();
+                    $excess -= $apply;
+                }
+            }
+        }
 
         // Link the delivery order to the created sale to prevent debt double-counting
         $deliveryOrder->sale_id = $sale->id;
@@ -624,7 +757,14 @@ class DeliveryController extends Controller
             $return->process($request->warehouse_id);
         }
 
-        return response()->json(['message' => 'تمت معالجة المرتجعات بنجاح', 'count' => $returns->count()]);
+        return response()->json([
+            'message' => $this->localize($request, [
+                'ar' => 'تمت معالجة المرتجعات بنجاح',
+                'fr' => 'Retours traités avec succès',
+                'en' => 'Returns processed successfully',
+            ]),
+            'count' => $returns->count(),
+        ]);
     }
 
     public function processReturn(Request $request, Delivery $delivery, DeliveryReturn $return)
@@ -634,17 +774,33 @@ class DeliveryController extends Controller
         ]);
 
         if ($return->delivery_id !== $delivery->id) {
-            return response()->json(['message' => 'المرتجع لا ينتمي لهذه التوصيلة'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'المرتجع لا ينتمي لهذه التوصيلة',
+                    'fr' => "Le retour n'appartient pas à cette livraison",
+                    'en' => 'Return does not belong to this delivery',
+                ]),
+            ], 422);
         }
 
         if ($return->processed) {
-            return response()->json(['message' => 'تمت معالجة هذا المرتجع مسبقاً'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'تمت معالجة هذا المرتجع مسبقاً',
+                    'fr' => 'Ce retour a déjà été traité',
+                    'en' => 'This return has already been processed',
+                ]),
+            ], 422);
         }
 
         $return->process($request->warehouse_id);
 
         return response()->json([
-            'message' => 'تمت معالجة المرتجع بنجاح',
+            'message' => $this->localize($request, [
+                'ar' => 'تمت معالجة المرتجع بنجاح',
+                'fr' => 'Retour traité avec succès',
+                'en' => 'Return processed successfully',
+            ]),
             'return' => $return->fresh()->load('product'),
         ]);
     }
@@ -748,7 +904,13 @@ class DeliveryController extends Controller
     {
         // Check if user has permission to collect debt
         if (!auth()->user()->can_collect_debt) {
-            return response()->json(['message' => 'ليس لديك صلاحية تحصيل الديون'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'ليس لديك صلاحية تحصيل الديون',
+                    'fr' => "Vous n'avez pas la permission d'encaisser des dettes",
+                    'en' => 'You are not allowed to collect debt',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -761,7 +923,11 @@ class DeliveryController extends Controller
 
         if ($amount > $remainingDue) {
             return response()->json([
-                'message' => 'المبلغ أكبر من المتبقي'
+                'message' => $this->localize($request, [
+                    'ar' => 'المبلغ أكبر من المتبقي',
+                    'fr' => 'Le montant dépasse le solde restant',
+                    'en' => 'Amount exceeds remaining balance',
+                ]),
             ], 422);
         }
 
@@ -800,7 +966,7 @@ class DeliveryController extends Controller
                 $caisse->addTransaction(
                     'in',
                     $amount,
-                    'delivery',
+                    'debt_collection',
                     $deliveryOrder->id,
                     "تحصيل دين توصيل #{$deliveryOrder->order_id}",
                     auth()->id()
@@ -810,13 +976,23 @@ class DeliveryController extends Controller
             DB::commit();
 
             return response()->json([
-                'message' => 'تم تسجيل الدفعة بنجاح',
+                'message' => $this->localize($request, [
+                    'ar' => 'تم تسجيل الدفعة بنجاح',
+                    'fr' => 'Paiement enregistré avec succès',
+                    'en' => 'Payment recorded successfully',
+                ]),
                 'delivery_order' => $deliveryOrder->fresh()->load('client'),
                 'delivery' => $delivery->fresh(),
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['message' => 'حدث خطأ أثناء تسجيل الدفعة'], 500);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'حدث خطأ أثناء تسجيل الدفعة',
+                    'fr' => "Une erreur s'est produite lors de l'enregistrement du paiement",
+                    'en' => 'An error occurred while recording the payment',
+                ]),
+            ], 500);
         }
     }
 
@@ -924,7 +1100,13 @@ class DeliveryController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         // Active deliveries (preparing + in_progress)
@@ -1261,7 +1443,13 @@ class DeliveryController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -1437,7 +1625,11 @@ class DeliveryController extends Controller
             DB::commit();
 
             return response()->json([
-                'message' => 'تم إرجاع المنتجات بنجاح',
+                'message' => $this->localize($request, [
+                    'ar' => 'تم إرجاع المنتجات بنجاح',
+                    'fr' => 'Produits retournés avec succès',
+                    'en' => 'Products returned successfully',
+                ]),
                 'processed' => $processed,
             ]);
         } catch (\Exception $e) {

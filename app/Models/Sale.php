@@ -133,4 +133,39 @@ class Sale extends Model
         }
         return 'unpaid';
     }
+
+    protected static function booted()
+    {
+        // Mirror the sale's payment_status onto the sales-order it was delivered
+        // for, so the seller/orders apps never show a paid delivery as
+        // "غير مدفوع". Fires for EVERY payment path that saves the Sale —
+        // delivery, livreur debt collection, dashboard payment, client payment —
+        // not just at delivery time. (Delivery-time sync is also done explicitly
+        // in DeliveryController, since the sale↔order link is set after the last
+        // save there.)
+        static::saved(function (Sale $sale) {
+            $sale->syncOrderPaymentStatus();
+        });
+    }
+
+    /**
+     * Keep the originating sales-order(s) in lockstep with this sale's
+     * payment_status. A delivery sale links back via delivery_orders.sale_id →
+     * order_id. No-op for sales not tied to a delivered order (e.g. plain POS).
+     */
+    public function syncOrderPaymentStatus(): void
+    {
+        $orderIds = DeliveryOrder::where('sale_id', $this->id)
+            ->whereNotNull('order_id')
+            ->pluck('order_id')
+            ->unique();
+
+        if ($orderIds->isEmpty()) {
+            return;
+        }
+
+        Order::whereIn('id', $orderIds)
+            ->where('payment_status', '!=', $this->payment_status)
+            ->update(['payment_status' => $this->payment_status]);
+    }
 }

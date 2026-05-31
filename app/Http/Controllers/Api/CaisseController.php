@@ -6,11 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Models\Caisse;
 use App\Models\CaisseSettlement;
 use App\Models\CaisseTransfer;
+use App\Traits\LocalizesMessages;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class CaisseController extends Controller
 {
+    use LocalizesMessages;
+
     /**
      * List all caisses (admin sees all, seller/livreur sees own)
      */
@@ -45,7 +48,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -57,7 +66,13 @@ class CaisseController extends Controller
 
         // Only admin can have multiple caisses
         if ($targetUser->role !== 'admin' && Caisse::where('user_id', $targetUser->id)->exists()) {
-            return response()->json(['message' => 'هذا المستخدم لديه صندوق بالفعل'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'هذا المستخدم لديه صندوق بالفعل',
+                    'fr' => 'Cet utilisateur possède déjà une caisse',
+                    'en' => 'This user already has a caisse',
+                ]),
+            ], 422);
         }
 
         // Determine type from role
@@ -88,7 +103,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $caisse = Caisse::findOrFail($id);
@@ -105,14 +126,20 @@ class CaisseController extends Controller
     /**
      * Show caisse details with recent transactions
      */
-    public function show($id)
+    public function show(Request $request, $id)
     {
         $user = auth()->user();
 
         $caisse = Caisse::with(['user:id,name,role,phone'])->findOrFail($id);
 
         if (!$user->isAdmin() && !$user->isManager() && $caisse->user_id !== $user->id) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $recentTransactions = $caisse->transactions()
@@ -143,7 +170,13 @@ class CaisseController extends Controller
         $caisse = Caisse::findOrFail($id);
 
         if (!$user->isAdmin() && !$user->isManager() && $caisse->user_id !== $user->id) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $query = $caisse->transactions()->with('creator:id,name');
@@ -200,7 +233,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'فقط المدير يمكنه إجراء التحصيل'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'فقط المدير يمكنه إجراء التحصيل',
+                    'fr' => 'Seul le gestionnaire peut effectuer un encaissement',
+                    'en' => 'Only managers can collect settlements',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -212,7 +251,13 @@ class CaisseController extends Controller
         $caisse = Caisse::findOrFail($id);
 
         if ($request->amount > $caisse->balance) {
-            return response()->json(['message' => 'المبلغ أكبر من الرصيد الحالي'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'المبلغ أكبر من الرصيد الحالي',
+                    'fr' => 'Le montant dépasse le solde actuel',
+                    'en' => 'Amount exceeds current balance',
+                ]),
+            ], 422);
         }
 
         DB::beginTransaction();
@@ -244,7 +289,11 @@ class CaisseController extends Controller
             DB::commit();
 
             return response()->json([
-                'message' => 'تمت عملية التحصيل بنجاح',
+                'message' => $this->localize($request, [
+                    'ar' => 'تمت عملية التحصيل بنجاح',
+                    'fr' => 'Encaissement effectué avec succès',
+                    'en' => 'Settlement completed successfully',
+                ]),
                 'settlement' => $settlement->load('settler:id,name'),
                 'caisse' => $caisse->fresh(),
             ]);
@@ -266,7 +315,13 @@ class CaisseController extends Controller
             ->first();
 
         if (!$caisse) {
-            return response()->json(['message' => 'لا يوجد صندوق لهذا المستخدم'], 404);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'لا يوجد صندوق لهذا المستخدم',
+                    'fr' => "Aucune caisse n'est associée à cet utilisateur",
+                    'en' => 'No caisse for this user',
+                ]),
+            ], 404);
         }
 
         $recentTransactions = $caisse->transactions()
@@ -275,9 +330,42 @@ class CaisseController extends Controller
             ->take(20)
             ->get();
 
+        // ERP breakdown: keep the money streams separate (delivery sales vs
+        // old-debt recovery vs other), for both the whole caisse life and today.
+        $startOfDay = now()->startOfDay();
+
+        $sumIn = function ($sourceType = null, $since = null) use ($caisse) {
+            $q = $caisse->transactions()->where('type', 'in');
+            if ($sourceType !== null) $q->where('source_type', $sourceType);
+            if ($since !== null) $q->where('created_at', '>=', $since);
+            return (float) $q->sum('amount');
+        };
+        $sumOut = function ($since = null) use ($caisse) {
+            $q = $caisse->transactions()->where('type', 'out');
+            if ($since !== null) $q->where('created_at', '>=', $since);
+            return (float) $q->sum('amount');
+        };
+
+        $totalIn = $sumIn();
+        $deliveryIn = $sumIn('delivery');
+        $debtIn = $sumIn('debt_collection');
+
         return response()->json([
             'caisse' => $caisse,
             'recent_transactions' => $recentTransactions,
+            'summary' => [
+                'total_in' => $totalIn,
+                'total_out' => $sumOut(),
+                'delivery_in' => $deliveryIn,            // payments for the delivered orders
+                'debt_collection_in' => $debtIn,         // recovery of previous debt
+                'other_in' => max(0, $totalIn - $deliveryIn - $debtIn),
+                'today' => [
+                    'total_in' => $sumIn(null, $startOfDay),
+                    'total_out' => $sumOut($startOfDay),
+                    'delivery_in' => $sumIn('delivery', $startOfDay),
+                    'debt_collection_in' => $sumIn('debt_collection', $startOfDay),
+                ],
+            ],
         ]);
     }
 
@@ -289,7 +377,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'فقط المدير يمكنه إجراء التحويل'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'فقط المدير يمكنه إجراء التحويل',
+                    'fr' => 'Seul le gestionnaire peut effectuer un transfert',
+                    'en' => 'Only managers can transfer funds',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -303,7 +397,13 @@ class CaisseController extends Controller
         $toCaisse = Caisse::findOrFail($request->to_caisse_id);
 
         if ($request->amount > $fromCaisse->balance) {
-            return response()->json(['message' => 'المبلغ أكبر من رصيد الصندوق المصدر'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'المبلغ أكبر من رصيد الصندوق المصدر',
+                    'fr' => 'Le montant dépasse le solde de la caisse source',
+                    'en' => 'Amount exceeds source caisse balance',
+                ]),
+            ], 422);
         }
 
         DB::beginTransaction();
@@ -338,7 +438,11 @@ class CaisseController extends Controller
             DB::commit();
 
             return response()->json([
-                'message' => 'تم التحويل بنجاح',
+                'message' => $this->localize($request, [
+                    'ar' => 'تم التحويل بنجاح',
+                    'fr' => 'Transfert effectué avec succès',
+                    'en' => 'Transfer completed successfully',
+                ]),
                 'transfer' => $transfer->load(['fromCaisse.user:id,name', 'toCaisse.user:id,name', 'creator:id,name']),
                 'from_caisse' => $fromCaisse->fresh(),
                 'to_caisse' => $toCaisse->fresh(),
@@ -357,7 +461,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'فقط المدير يمكنه تعديل الرصيد'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'فقط المدير يمكنه تعديل الرصيد',
+                    'fr' => 'Seul le gestionnaire peut ajuster le solde',
+                    'en' => 'Only managers can adjust the balance',
+                ]),
+            ], 403);
         }
 
         $request->validate([
@@ -369,7 +479,13 @@ class CaisseController extends Controller
         $caisse = Caisse::findOrFail($id);
 
         if ($request->type === 'remove' && $request->amount > $caisse->balance) {
-            return response()->json(['message' => 'المبلغ أكبر من الرصيد الحالي'], 422);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'المبلغ أكبر من الرصيد الحالي',
+                    'fr' => 'Le montant dépasse le solde actuel',
+                    'en' => 'Amount exceeds current balance',
+                ]),
+            ], 422);
         }
 
         $txType = $request->type === 'add' ? 'in' : 'out';
@@ -387,7 +503,17 @@ class CaisseController extends Controller
         );
 
         return response()->json([
-            'message' => $request->type === 'add' ? 'تم إضافة الرصيد بنجاح' : 'تم خصم الرصيد بنجاح',
+            'message' => $request->type === 'add'
+                ? $this->localize($request, [
+                    'ar' => 'تم إضافة الرصيد بنجاح',
+                    'fr' => 'Solde ajouté avec succès',
+                    'en' => 'Balance added successfully',
+                ])
+                : $this->localize($request, [
+                    'ar' => 'تم خصم الرصيد بنجاح',
+                    'fr' => 'Solde déduit avec succès',
+                    'en' => 'Balance deducted successfully',
+                ]),
             'caisse' => $caisse->fresh()->load('user:id,name,role'),
         ]);
     }
@@ -400,7 +526,13 @@ class CaisseController extends Controller
         $user = auth()->user();
 
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $caisses = Caisse::with('user:id,name,role')->where('is_active', true)->get();
@@ -453,7 +585,13 @@ class CaisseController extends Controller
     {
         $user = auth()->user();
         if (!$user->isAdmin() && !$user->isManager()) {
-            return response()->json(['message' => 'غير مصرح'], 403);
+            return response()->json([
+                'message' => $this->localize($request, [
+                    'ar' => 'غير مصرح',
+                    'fr' => 'Non autorisé',
+                    'en' => 'Not authorized',
+                ]),
+            ], 403);
         }
 
         $request->validate([
